@@ -1,4 +1,5 @@
 pub(crate) mod analyze;
+mod calldata;
 pub(crate) mod control_flow;
 mod event_logs;
 pub(crate) mod ir;
@@ -275,9 +276,20 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
             Entry::Walked(entry_point) => {
                 function_evm.symbolic_exec_selector_with_budget(&selector, entry_point, budget)
             }
-            Entry::Supplied(entry_pc) => decode_hex(&selector).map_err(Into::into).and_then(
-                |calldata| function_evm.symbolic_exec_from_entry(&calldata, entry_pc, budget),
-            ),
+            Entry::Supplied(entry_pc) => {
+                // calldata shaped by the argument types when they are known (F9)
+                let typed = args
+                    .selector_abi
+                    .as_ref()
+                    .and_then(|abi| abi.get(&selector))
+                    .and_then(|abi| calldata::typed_calldata(&selector, &abi.inputs));
+                typed
+                    .map(Ok)
+                    .unwrap_or_else(|| decode_hex(&selector).map_err(Into::into))
+                    .and_then(|calldata| {
+                        function_evm.symbolic_exec_from_entry(&calldata, entry_pc, budget)
+                    })
+            }
         };
         let (map, stats) = match result {
             Ok(map) => map,
@@ -768,6 +780,50 @@ mod tests {
         let wrong = report("22222222");
         assert_eq!(wrong.status, BodyStatus::Failed);
         assert!(wrong.failure.as_deref().unwrap().contains("entry_not_reached"), "{wrong:?}");
+    }
+
+    #[tokio::test]
+    async fn only_a_literal_zero_size_renders_a_value_transfer() {
+        use heimdall_vm::core::opcodes;
+
+        // 0x11111111 (pc 26): call(gas, caller, callvalue, 0, 0, 0, 0) -- a plain ETH transfer
+        // 0x22222222 (pc 41): execute(address target, bytes data) -- copies `data` to 0x80 and
+        // calls target with it; with selector-only calldata its length evaluates to 0
+        let code = "60003560e01c80631111111114601a57632222222214602957005b600060006000600034335af150005b60243560040180359060200181906080376000600082608060006004355af1505000";
+        let abi = |inputs: &[&str]| SelectorAbi {
+            inputs: inputs.iter().map(|s| s.to_string()).collect(),
+            outputs: None,
+        };
+        let args = DecompilerArgsBuilder::new()
+            .target(code.to_string())
+            .skip_resolving(true)
+            .include_solidity(true)
+            .hardfork(HardFork::Fusaka)
+            .selector_abi(Some(BTreeMap::from([
+                ("11111111".to_string(), abi(&[])),
+                ("22222222".to_string(), abi(&["address", "bytes"])),
+            ])))
+            .entry_points(Some(BTreeMap::from([
+                ("11111111".to_string(), 26),
+                ("22222222".to_string(), 41),
+            ])))
+            .build()
+            .unwrap();
+        let result = decompile(args).await.unwrap();
+        let source = result.source.unwrap();
+        let body = |name: &str| {
+            let start = source.find(&format!("function {name}(")).unwrap();
+            let rest = &source[start + 1..];
+            rest[..rest.find("function ").unwrap_or(rest.len())].to_string()
+        };
+        assert!(body("func_11111111").contains(".transfer("), "{source}");
+        assert!(!body("func_22222222").contains(".transfer("), "{source}");
+
+        // typed calldata: `data` is one byte long, so the forwarded size is 1, not 0
+        let exec = result.functions.iter().find(|f| f.selector == "22222222").unwrap();
+        let call = exec.effects.iter().find(|e| e.opcode == opcodes::CALL).unwrap();
+        assert_eq!(call.selector, Some(crate::EffectOperand::Dynamic));
+        assert_eq!(call.target, Some(crate::EffectOperand::Arg(0)));
     }
 
     #[tokio::test]
