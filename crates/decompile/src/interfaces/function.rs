@@ -204,11 +204,13 @@ impl AnalyzedFunction {
     /// The key used to order functions in the generated output. Functions are ordered
     /// alphabetically by their emitted name, using the resolved signature (for overloads) and
     /// the selector (for unresolved names) as tie-breakers.
-    fn output_order_key(&self) -> (String, String, String) {
+    fn output_order_key(&self) -> (String, String, String, bool) {
         (
             self.emitted_name().to_lowercase(),
             self.resolved_function.as_ref().map(|sig| sig.signature.clone()).unwrap_or_default(),
             self.selector.clone(),
+            // `fallback` and `receive` share the placeholder selector
+            self.receive,
         )
     }
 }

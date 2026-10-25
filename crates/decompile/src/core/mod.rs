@@ -200,7 +200,9 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
     let mut job_used = ExecStats::default();
     let mut reports: HashMap<String, FunctionReport> = HashMap::new();
 
-    let mut symbolic_execution_maps = HashMap::new();
+    // ordered, so functions are analyzed (and share postprocessor state) in the same order in
+    // every process
+    let mut symbolic_execution_maps = std::collections::BTreeMap::new();
     if selectors.is_empty() {
         warn!("discovered no function selectors in the bytecode.");
         let start_sym_exec_time = Instant::now();
