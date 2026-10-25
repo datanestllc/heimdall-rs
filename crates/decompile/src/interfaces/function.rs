@@ -61,6 +61,10 @@ pub(crate) struct AnalyzedFunction {
     /// whether this is the fallback function for the contract
     pub fallback: bool,
 
+    /// whether this is what empty calldata runs (`receive`, or `fallback` without one); also
+    /// marked `fallback`
+    pub receive: bool,
+
     /// the analyzer type used to analyze this function
     pub analyzer_type: AnalyzerType,
 
@@ -126,6 +130,7 @@ impl AnalyzedFunction {
             payable: true,
             analyzer_type: AnalyzerType::Abi,
             fallback,
+            receive: false,
             maybe_getter_for: None,
             constant_value: None,
             effects: BTreeSet::new(),

@@ -82,9 +82,16 @@ pub(crate) async fn build_source(
         source.extend(declarations.iter().map(|declaration| declaration.line.clone()));
 
         // add the fallback function, if it exists
-        if let Some(fallback) = functions.iter().find(|f| f.fallback) {
+        if let Some(fallback) = functions.iter().find(|f| f.fallback && !f.receive) {
             source.push(String::from("fallback() external payable {"));
             source.extend(fallback.logic.clone());
+            source.extend(vec![String::from("}"), String::from("")]);
+        }
+
+        // add what empty calldata runs, if it was explored
+        if let Some(receive) = functions.iter().find(|f| f.receive) {
+            source.push(String::from("receive() external payable {"));
+            source.extend(receive.logic.clone());
             source.extend(vec![String::from("}"), String::from("")]);
         }
     }
@@ -111,7 +118,7 @@ pub(crate) async fn build_source(
 
     if analyzer_type == AnalyzerType::Yul {
         // add the fallback function, if it exists
-        if let Some(fallback) = functions.iter().find(|f| f.fallback) {
+        if let Some(fallback) = functions.iter().find(|f| f.fallback && !f.receive) {
             source.push("default {".to_string());
             source.extend(fallback.logic.clone());
             source.push("}".to_string());

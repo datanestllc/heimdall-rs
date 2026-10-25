@@ -3,6 +3,10 @@ mod util;
 
 use crate::{
     core::{
+        opcodes::{
+            WrappedInput, WrappedOpcode, ADD, AND, CALLDATALOAD, CALLDATASIZE, DIV, EQ, GT, ISZERO,
+            LT, MOD, MUL, NOT, OR, PUSH0, PUSH32, SGT, SHL, SHR, SLT, SUB, XOR,
+        },
         stack::Stack,
         vm::{State, VM},
     },
@@ -18,6 +22,7 @@ use crate::{
         },
     },
 };
+use alloy::primitives::U256;
 use eyre::Result;
 use hashbrown::HashMap;
 use heimdall_common::utils::strings::decode_hex;
@@ -133,6 +138,58 @@ impl ExecStats {
     }
 }
 
+/// Whether a JUMPI condition reads calldata, and only through `CALLDATASIZE` or the selector
+/// (`calldataload(0)` shifted right by 224 bits, or divided by 2^224), on top of constants and
+/// pure arithmetic. Such a condition is decided by the calldata of a non-selector entry.
+fn is_decided_by_dispatch(condition: &WrappedOpcode) -> bool {
+    fn constant(input: &WrappedInput) -> Option<U256> {
+        match input {
+            WrappedInput::Raw(value) => Some(*value),
+            WrappedInput::Opcode(op) if (PUSH0..=PUSH32).contains(&op.opcode) => {
+                op.inputs.first().map_or(Some(U256::ZERO), constant)
+            }
+            WrappedInput::Opcode(_) => None,
+        }
+    }
+    fn is_selector_word(op: &WrappedOpcode) -> bool {
+        op.opcode == CALLDATALOAD && op.inputs.first().and_then(constant) == Some(U256::ZERO)
+    }
+    fn walk(op: &WrappedOpcode, reads: &mut bool) -> bool {
+        let operand = |i: usize| match op.inputs.get(i) {
+            Some(WrappedInput::Opcode(inner)) => Some(&**inner),
+            _ => None,
+        };
+        match op.opcode {
+            PUSH0..=PUSH32 => true,
+            CALLDATASIZE => {
+                *reads = true;
+                true
+            }
+            // calldataload(0) >> 224 and calldataload(0) / 2^224: the selector
+            SHR if constant(&op.inputs[0]) == Some(U256::from(224)) &&
+                operand(1).is_some_and(is_selector_word) =>
+            {
+                *reads = true;
+                true
+            }
+            DIV if op.inputs.get(1).and_then(constant) == Some(U256::from(1) << 224) &&
+                operand(0).is_some_and(is_selector_word) =>
+            {
+                *reads = true;
+                true
+            }
+            ADD | SUB | MUL | DIV | MOD | LT | GT | SLT | SGT | EQ | ISZERO | AND | OR | XOR |
+            NOT | SHL | SHR => op.inputs.iter().all(|input| match input {
+                WrappedInput::Raw(_) => true,
+                WrappedInput::Opcode(inner) => walk(inner, reads),
+            }),
+            _ => false,
+        }
+    }
+    let mut reads = false;
+    !condition.is_too_large_to_expand() && walk(condition, &mut reads) && reads
+}
+
 /// Approximate heap bytes of one saved [`State`]: memory, stack frames, storage and logs.
 pub fn approximate_state_bytes(state: &State) -> u64 {
     let memory = state.memory.memory.len() as u64;
@@ -150,11 +207,14 @@ pub fn approximate_state_bytes(state: &State) -> u64 {
 struct ExecContext {
     budget: ExecBudget,
     stats: ExecStats,
+    /// Follow only the side the VM takes at a JUMPI decided by the selector or the calldata size
+    /// (see [`VM::symbolic_exec_entry`]).
+    follow_dispatch: bool,
 }
 
 impl ExecContext {
     fn new(budget: ExecBudget) -> Self {
-        Self { budget, stats: ExecStats::default() }
+        Self { budget, stats: ExecStats::default(), follow_dispatch: false }
     }
 
     /// The first exhausted budget, if any.
@@ -294,6 +354,26 @@ impl VM {
         if trace.operations.is_empty() && trace.children.is_empty() {
             warn!("symbolic execution returned no valid traces");
         }
+        Ok((trace, ctx.stats))
+    }
+
+    /// Performs symbolic execution from pc 0 with the given calldata, for an entry that is not a
+    /// selector: empty calldata (what `receive` runs) or a selector the dispatcher does not match
+    /// (what `fallback` runs).
+    ///
+    /// A JUMPI whose condition reads calldata only through `CALLDATASIZE` or the selector
+    /// (`calldataload(0) >> 224`) is decided by that calldata, so only the side the VM takes is
+    /// followed: the other side belongs to other entries, and it is not a dropped path. Every
+    /// other JUMPI forks as usual.
+    pub fn symbolic_exec_entry(
+        &mut self,
+        calldata: &[u8],
+        budget: ExecBudget,
+    ) -> Result<(VMTrace, ExecStats)> {
+        self.calldata = calldata.to_vec();
+        let mut ctx = ExecContext::new(budget);
+        ctx.follow_dispatch = true;
+        let trace = self.recursive_map(&mut ctx, &mut HashMap::new());
         Ok((trace, ctx.stats))
     }
 
@@ -518,6 +598,14 @@ impl VM {
                     .saturating_add(1);
                 let fallthrough = last_instruction.instruction + 1;
 
+                // dispatch on the calldata of this entry: the other side is another entry
+                if ctx.follow_dispatch &&
+                    last_instruction.input_operations.get(1).is_some_and(is_decided_by_dispatch)
+                {
+                    vm_trace.children.push(vm.recursive_map(ctx, handled_jumps));
+                    break;
+                }
+
                 // out of branches: follow the side the VM took, and keep the other side as a marker
                 // so the JUMPI keeps both children and its condition
                 if ctx.stats.branches >= ctx.budget.max_branches {
@@ -638,6 +726,29 @@ mod tests {
             Some(Truncation { reason: TruncationReason::BranchBudget, pc: 5 })
         );
         assert!(trace.children[1].truncated.is_none());
+    }
+
+    #[test]
+    fn entry_exploration_follows_dispatch_but_forks_on_arguments() {
+        // 0: CALLDATASIZE ISZERO PUSH1 27 JUMPI            -- empty calldata: receive at 27
+        // 5: PUSH1 0 CALLDATALOAD PUSH1 0xe0 SHR PUSH4 11111111 EQ PUSH1 29 JUMPI
+        // 20: PUSH1 4 CALLDATALOAD PUSH1 31 JUMPI STOP     -- forks on an argument word
+        // 27: JUMPDEST STOP  29: JUMPDEST STOP  31: JUMPDEST STOP
+        let code = "3615601b5760003560e01c631111111114601d57600435601f57005b005b005b00";
+        let fallback = [0xff, 0xff, 0xff, 0xff];
+        let (trace, stats) =
+            vm(code).symbolic_exec_entry(&fallback, ExecBudget::unlimited()).unwrap();
+        // the two dispatch JUMPIs are followed, only the argument JUMPI forks
+        assert_eq!(stats.branches, 1);
+        assert_eq!(trace.children.len(), 1);
+        assert_eq!(trace.children[0].children.len(), 1);
+        assert_eq!(trace.children[0].children[0].children.len(), 2);
+
+        // empty calldata goes to the receive block
+        let (trace, stats) = vm(code).symbolic_exec_entry(&[], ExecBudget::unlimited()).unwrap();
+        assert_eq!(stats.branches, 0);
+        assert_eq!(trace.children.len(), 1);
+        assert_eq!(trace.children[0].instruction, 28);
     }
 
     #[test]

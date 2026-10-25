@@ -122,6 +122,13 @@ pub struct DecompilerArgs {
     #[clap(long, short, default_value = None, hide_default_value = true)]
     pub abi: Option<String>,
 
+    /// Also explore the two entries that are not selectors, each from pc 0: empty calldata
+    /// (`receive`) and a selector the dispatcher does not match (`fallback`). Dispatch on the
+    /// selector or the calldata size follows that calldata; other branches fork as usual.
+    #[clap(long)]
+    #[builder(default)]
+    pub fallback_entries: bool,
+
     /// Argument and return types per selector (8 lowercase hex characters, no `0x`), for library
     /// callers. For these selectors the given types are used as they are: signature matching is
     /// skipped, the header and the body are typed from them, and the function is named
@@ -263,6 +270,7 @@ impl DecompilerArgsBuilder {
             job_timeout: Some(0),
             abi: Some(None),
             selector_abi: Some(None),
+            fallback_entries: Some(false),
             llm_postprocess: Some(false),
             openrouter_api_key: Some(String::new()),
             model: Some(String::new()),

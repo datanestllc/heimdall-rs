@@ -75,7 +75,7 @@ pub struct DecompileResult {
     pub abi: JsonAbi,
     /// The extended ABI with selector and signature information
     pub abi_with_details: serde_json::Value,
-    /// One report per function found, ordered by selector (`fallback` last)
+    /// One report per function found, ordered by selector (`fallback` and `receive` last)
     pub functions: Vec<FunctionReport>,
 }
 
@@ -216,6 +216,32 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
     // storage, so one function's SSTOREs used to steer the next, in hash-map order
     let mut selectors = selectors.into_iter().collect::<Vec<_>>();
     selectors.sort();
+
+    // the entries that are not selectors run first: a dispatcher with selectors used to hide
+    // them completely
+    if args.fallback_entries && !selectors.is_empty() {
+        let known = selectors
+            .iter()
+            .map(|(selector, _)| selector.as_str())
+            .chain(args.selector_abi.iter().flat_map(|abi| abi.keys().map(String::as_str)))
+            .collect::<std::collections::BTreeSet<_>>();
+        let unmatched = (0..=u32::MAX)
+            .rev()
+            .map(|candidate| format!("{candidate:08x}"))
+            .find(|candidate| !known.contains(candidate.as_str()))
+            .expect("impossible case: every selector is known");
+        let unmatched = decode_hex(&unmatched).expect("impossible case: invalid selector");
+        for (entry, calldata) in [("fallback", unmatched), ("receive", Vec::new())] {
+            let mut entry_evm = evm.clone();
+            let (map, stats) = entry_evm
+                .symbolic_exec_entry(&calldata, args.function_budget(job_steps_used, job_deadline))
+                .map_err(|e| Error::Eyre(eyre!("symbolic execution failed: {}", e)))?;
+            job_steps_used += stats.steps;
+            debug!("'{}' has {} unique branches", entry, stats.branches);
+            reports.insert(entry.to_string(), FunctionReport::explored(entry, &map, stats));
+            symbolic_execution_maps.insert(entry.to_string(), map);
+        }
+    }
     let overall_sym_exec_time = Instant::now();
     for (selector, entry_point) in selectors {
         let start_sym_exec_time = Instant::now();
@@ -247,11 +273,10 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
     let start_analysis_time = Instant::now();
     let handles = symbolic_execution_maps.into_iter().map(|(selector, trace_root)| {
         let mut evm_clone = evm.clone();
-        let mut analyzer = Analyzer::new(
-            analyzer_type,
-            args.skip_resolving,
-            AnalyzedFunction::new(&selector, selector == "fallback"),
-        );
+        let mut function =
+            AnalyzedFunction::new(&selector, selector == "fallback" || selector == "receive");
+        function.receive = selector == "receive";
+        let mut analyzer = Analyzer::new(analyzer_type, args.skip_resolving, function);
         let key = selector.clone();
         let analysis = async move {
             // analyze the symbolic execution trace; keep what was found even if it fails
@@ -485,8 +510,9 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
     debug!("decompilation took {:?}", start_time.elapsed());
 
     let mut functions = reports.into_values().collect::<Vec<_>>();
+    let entry = |selector: &str| matches!(selector, "fallback" | "receive");
     functions.sort_by(|a, b| {
-        (a.selector == "fallback", &a.selector).cmp(&(b.selector == "fallback", &b.selector))
+        (entry(&a.selector), &a.selector).cmp(&(entry(&b.selector), &b.selector))
     });
 
     Ok(DecompileResult { source, abi, abi_with_details, functions })
@@ -618,6 +644,37 @@ mod tests {
             let reader = result.functions.iter().find(|f| f.selector == "22222222").unwrap();
             assert!(!reader.executed_pcs.contains(&41), "{reader:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn fallback_and_receive_are_explored_next_to_selectors() {
+        use heimdall_vm::core::opcodes;
+
+        // 0: CALLDATASIZE ISZERO PUSH1 28 JUMPI                         -- receive at 28
+        // 5: PUSH1 0 CALLDATALOAD PUSH1 0xe0 SHR PUSH4 11111111 EQ PUSH1 35 JUMPI
+        // 20: PUSH1 7 PUSH1 0 SSTORE STOP STOP STOP                     -- fallback body
+        // 28: JUMPDEST PUSH1 0 PUSH1 0 LOG0 STOP   35: JUMPDEST STOP
+        let code = "3615601c5760003560e01c63111111111460235760076000550000005b60006000a0005b00";
+        let args = DecompilerArgsBuilder::new()
+            .target(code.to_string())
+            .skip_resolving(true)
+            .include_solidity(true)
+            .hardfork(HardFork::Fusaka)
+            .fallback_entries(true)
+            .build()
+            .unwrap();
+        let result = decompile(args).await.unwrap();
+        let selectors = result.functions.iter().map(|f| f.selector.as_str()).collect::<Vec<_>>();
+        assert_eq!(selectors, vec!["11111111", "fallback", "receive"]);
+        let opcodes_of = |name: &str| {
+            let f = result.functions.iter().find(|f| f.selector == name).unwrap();
+            f.effects.iter().map(|e| e.opcode).collect::<Vec<_>>()
+        };
+        assert_eq!(opcodes_of("fallback"), vec![opcodes::SSTORE]);
+        assert_eq!(opcodes_of("receive"), vec![opcodes::LOG0]);
+        let source = result.source.unwrap();
+        assert!(source.contains("fallback() external payable {"), "{source}");
+        assert!(source.contains("receive() external payable {"), "{source}");
     }
 
     #[tokio::test]
