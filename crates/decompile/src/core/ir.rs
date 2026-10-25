@@ -990,6 +990,7 @@ mod tests {
         }
         assert_eq!(x.tree_size(), u64::MAX);
         assert_eq!(x.solidify(), "expression_too_large");
+        assert_eq!(x.to_string(), "ADDMOD(expression_too_large)");
         let rendered = Expr::from_opcode(&x).render();
         assert!(rendered.contains("/* expression too large */"), "{rendered}");
         assert!(rendered.len() < 200, "{rendered}");

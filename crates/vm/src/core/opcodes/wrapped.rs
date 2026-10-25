@@ -141,6 +141,10 @@ impl std::fmt::Display for WrappedOpcode {
     /// The format is: `OPCODENAME(input1, input2, ...)` where each input is
     /// formatted according to its own [`Display`] implementation.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // expanding a huge shared expression never finishes; see `MAX_EXPANDED_NODES`
+        if self.is_too_large_to_expand() {
+            return write!(f, "{}(expression_too_large)", opcode_name(self.opcode));
+        }
         write!(
             f,
             "{}({})",
