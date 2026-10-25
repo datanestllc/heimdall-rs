@@ -1,3 +1,4 @@
+#[cfg(feature = "network")]
 use alloy::primitives::Address;
 use clap::Parser;
 use eyre::Result;
@@ -107,10 +108,17 @@ impl DisassemblerArgs {
         }
     }
 
+    #[cfg(not(feature = "network"))]
+    async fn detect_hardfork_from_creation_block(&self) -> Option<HardFork> {
+        // without the `network` feature there is no RPC to ask
+        None
+    }
+
     /// Attempts to detect the hardfork based on the contract's creation block.
     ///
     /// Returns `None` if the target is not a contract address, no RPC URL is available,
     /// or the creation block cannot be determined.
+    #[cfg(feature = "network")]
     async fn detect_hardfork_from_creation_block(&self) -> Option<HardFork> {
         // Need RPC URL to get chain_id and creation block
         if self.rpc_url.is_empty() {
@@ -135,6 +143,7 @@ impl DisassemblerArgs {
     /// Gets the creation block for a contract address.
     ///
     /// Uses Etherscan API if available and supported, otherwise falls back to binary search.
+    #[cfg(feature = "network")]
     async fn get_creation_block(&self, address: Address, chain_id: u64) -> Option<u64> {
         // If etherscan_api_key is provided and chain is supported, use Etherscan API
         if !self.etherscan_api_key.is_empty() &&

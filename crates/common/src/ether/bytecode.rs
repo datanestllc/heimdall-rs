@@ -2,10 +2,14 @@
 
 use crate::utils::strings::decode_hex;
 
+#[cfg(feature = "network")]
 use super::{etherscan::get_creation_bytecode, rpc::get_code};
-use alloy::primitives::{bytes::Bytes, Address};
+#[cfg(feature = "network")]
+use alloy::primitives::Address;
+use alloy::primitives::bytes::Bytes;
 use eyre::{eyre, Result};
 use std::fs;
+#[cfg(feature = "network")]
 use tracing::{debug, info, warn};
 
 /// Given a target, return bytecode of the target.
@@ -22,7 +26,11 @@ pub async fn get_bytecode_from_target(
     rpc_url: &str,
     etherscan_api_key: &str,
 ) -> Result<Vec<u8>> {
-    // If the target is an address, fetch the bytecode from the RPC provider.
+    // If the target is an address, fetch the bytecode from the RPC provider. Without the
+    // `network` feature a target is only ever bytecode or a file.
+    #[cfg(not(feature = "network"))]
+    let _ = (rpc_url, etherscan_api_key);
+    #[cfg(feature = "network")]
     if let Ok(address) = target.parse::<Address>() {
         if let Ok(bytecode) = get_code(address, rpc_url).await {
             if !bytecode.is_empty() {
@@ -136,6 +144,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "network")]
     #[tokio::test]
     async fn test_get_bytecode_when_target_is_address() {
         let rpc_url = std::env::var("RPC_URL").unwrap_or_else(|_| {
@@ -190,6 +199,7 @@ mod tests {
         fs::remove_file(file_path).expect("failed to remove mock file");
     }
 
+    #[cfg(feature = "network")]
     #[tokio::test]
     async fn test_get_creation_bytecode_for_self_destructed_contract() {
         let rpc_url = std::env::var("RPC_URL").unwrap_or_else(|_| {
@@ -214,6 +224,7 @@ mod tests {
         assert!(!bytecode.is_empty());
     }
 
+    #[cfg(feature = "network")]
     #[tokio::test]
     async fn test_get_bytecode_returns_empty_for_self_destructed_without_api_key() {
         let rpc_url = std::env::var("RPC_URL").unwrap_or_else(|_| {

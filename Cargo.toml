@@ -137,10 +137,13 @@ tokio = { version = "1", features = ["full"] }
 serde_json = "1.0"
 colored = "2"
 alloy-dyn-abi = "1.0"
-alloy = { version = "1.0", features = [
-    "full",
-    "rpc-types-debug",
-    "rpc-types-trace",
+# Only the offline parts; RPC providers and transports come with the `network` feature of
+# heimdall-common (`alloy/full`), which the crates that talk to the network enable.
+alloy = { version = "1.0", default-features = false, features = [
+    "std",
+    "dyn-abi",
+    "json-abi",
+    "sol-types",
 ] }
 serde = { version = "1.0", features = ["derive"] }
 async-trait = "0.1.51"

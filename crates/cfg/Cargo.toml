@@ -18,7 +18,7 @@ bench = false
 
 [dependencies]
 heimdall-config = { workspace = true }
-heimdall-common = { workspace = true }
+heimdall-common = { workspace = true, features = ["network"] }
 heimdall-cache = { workspace = true }
 thiserror.workspace = true
 clap = { workspace = true, features = ["derive"] }
@@ -29,8 +29,8 @@ futures.workspace = true
 lazy_static.workspace = true
 petgraph.workspace = true
 alloy.workspace = true
-heimdall-disassembler.workspace = true
-heimdall-vm.workspace = true
+heimdall-disassembler = { workspace = true, features = ["network"] }
+heimdall-vm = { workspace = true, features = ["network"] }
 
 [dev-dependencies]
 tokio.workspace = true

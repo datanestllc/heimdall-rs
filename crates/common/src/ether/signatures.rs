@@ -9,18 +9,23 @@ use async_trait::async_trait;
 
 use crate::{
     ether::types::{dyn_sol_types_to_strings, inputs_to_abi_format, parse_function_parameters},
-    utils::{
-        http::get_json_from_url,
-        io::{logging::TraceFactory, types::display},
-    },
+    utils::io::{logging::TraceFactory, types::display},
 };
-use eyre::{OptionExt, Result};
-use heimdall_cache::{store_cache, with_cache};
+#[cfg(feature = "network")]
+use eyre::OptionExt;
+use eyre::Result;
+#[cfg(feature = "network")]
+use crate::utils::http::get_json_from_url;
+use heimdall_cache::store_cache;
+#[cfg(feature = "network")]
+use heimdall_cache::with_cache;
 use serde::{
     ser::{SerializeMap, Serializer},
     Deserialize, Serialize,
 };
-use tracing::{debug, trace};
+#[cfg(feature = "network")]
+use tracing::trace;
+use tracing::debug;
 
 use super::types::DynSolValueExt;
 
@@ -152,6 +157,16 @@ pub trait ResolveSelector {
         Self: Sized;
 }
 
+/// Without the `network` feature nothing is looked up: no signature database, no cache.
+#[cfg(not(feature = "network"))]
+#[async_trait]
+impl ResolveSelector for ResolvedError {
+    async fn resolve(_selector: &str) -> Result<Option<Vec<Self>>> {
+        Ok(None)
+    }
+}
+
+#[cfg(feature = "network")]
 #[async_trait]
 impl ResolveSelector for ResolvedError {
     async fn resolve(selector: &str) -> Result<Option<Vec<Self>>> {
@@ -226,6 +241,16 @@ impl ResolveSelector for ResolvedError {
     }
 }
 
+/// Without the `network` feature nothing is looked up: no signature database, no cache.
+#[cfg(not(feature = "network"))]
+#[async_trait]
+impl ResolveSelector for ResolvedLog {
+    async fn resolve(_selector: &str) -> Result<Option<Vec<Self>>> {
+        Ok(None)
+    }
+}
+
+#[cfg(feature = "network")]
 #[async_trait]
 impl ResolveSelector for ResolvedLog {
     async fn resolve(selector: &str) -> Result<Option<Vec<Self>>> {
@@ -300,6 +325,16 @@ impl ResolveSelector for ResolvedLog {
     }
 }
 
+/// Without the `network` feature nothing is looked up: no signature database, no cache.
+#[cfg(not(feature = "network"))]
+#[async_trait]
+impl ResolveSelector for ResolvedFunction {
+    async fn resolve(_selector: &str) -> Result<Option<Vec<Self>>> {
+        Ok(None)
+    }
+}
+
+#[cfg(feature = "network")]
 #[async_trait]
 impl ResolveSelector for ResolvedFunction {
     async fn resolve(selector: &str) -> Result<Option<Vec<Self>>> {
@@ -545,16 +580,20 @@ impl TryFrom<&ResolvedFunction> for TraceFactory {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "network")]
     use heimdall_cache::delete_cache;
+
+    #[cfg(feature = "network")]
+    use crate::ether::signatures::{ResolveSelector, ResolvedError, ResolvedFunction, ResolvedLog};
 
     use crate::ether::{
         signatures::{
-            dyn_sol_types_to_strings, score_signature, ResolveSelector, ResolvedError,
-            ResolvedFunction, ResolvedLog,
+            dyn_sol_types_to_strings, score_signature,
         },
         types::parse_function_parameters,
     };
 
+    #[cfg(feature = "network")]
     #[tokio::test]
     async fn resolve_function_signature_nominal() {
         let signature = String::from("095ea7b3");
@@ -566,6 +605,7 @@ mod tests {
         assert!(!result.is_empty());
     }
 
+    #[cfg(feature = "network")]
     #[tokio::test]
     async fn resolve_multicall_signature() {
         let signature = String::from("1749e1e3");
@@ -584,6 +624,7 @@ mod tests {
         assert_eq!(multicall.inputs, vec!["tuple[]"]);
     }
 
+    #[cfg(feature = "network")]
     #[tokio::test]
     async fn resolve_error_signature_nominal() {
         let signature = String::from("30cd7471");
@@ -595,6 +636,7 @@ mod tests {
         assert!(!result.is_empty());
     }
 
+    #[cfg(feature = "network")]
     #[tokio::test]
     async fn resolve_event_signature_nominal() {
         let signature =
@@ -607,6 +649,7 @@ mod tests {
         assert!(!result.is_empty());
     }
 
+    #[cfg(feature = "network")]
     #[tokio::test]
     async fn resolve_function_signature_should_return_none_when_cached_results_not_found() {
         let signature = String::from("test_signature_nocache");
@@ -615,6 +658,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "network")]
     #[tokio::test]
     async fn resolve_function_signature_should_return_none_when_json_url_returns_empty_signatures()
     {
@@ -624,6 +668,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "network")]
     #[tokio::test]
     async fn resolve_error_signature_should_return_none_when_cached_results_not_found() {
         let signature = String::from("test_signature_notfound");
@@ -631,6 +676,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "network")]
     #[tokio::test]
     async fn resolve_error_signature_should_return_none_when_json_url_returns_none() {
         let signature = String::from("test_signature_notfound");
@@ -638,6 +684,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "network")]
     #[tokio::test]
     async fn resolve_error_signature_should_return_none_when_json_url_returns_empty_signatures() {
         let signature = String::from("test_signature_notfound");
@@ -645,6 +692,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "network")]
     #[tokio::test]
     async fn resolve_event_signature_should_return_none_when_cached_results_not_found() {
         let signature = String::from("test_signature_notfound");
@@ -652,6 +700,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "network")]
     #[tokio::test]
     async fn resolve_event_signature_should_return_none_when_json_url_returns_none() {
         let signature = String::from("test_signature_notfound");
@@ -659,6 +708,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "network")]
     #[tokio::test]
     async fn resolve_event_signature_should_return_none_when_json_url_returns_empty_signatures() {
         let signature = String::from("test_signature_notfound");

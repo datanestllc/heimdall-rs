@@ -243,7 +243,14 @@ impl DecompilerArgs {
         }
     }
 
+    #[cfg(not(feature = "network"))]
+    async fn detect_hardfork_from_creation_block(&self) -> Option<HardFork> {
+        // without the `network` feature there is no RPC to ask
+        None
+    }
+
     /// Attempts to detect the hardfork based on the contract's creation block.
+    #[cfg(feature = "network")]
     async fn detect_hardfork_from_creation_block(&self) -> Option<HardFork> {
         if self.rpc_url.is_empty() {
             return None;
@@ -257,6 +264,7 @@ impl DecompilerArgs {
     }
 
     /// Gets the creation block for a contract address.
+    #[cfg(feature = "network")]
     async fn get_creation_block(&self, address: Address, chain_id: u64) -> Option<u64> {
         if !self.etherscan_api_key.is_empty() &&
             heimdall_common::ether::etherscan::is_supported_chain(chain_id)

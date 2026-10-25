@@ -16,7 +16,7 @@ colored.workspace = true
 heimdall-tracing = { workspace = true }
 heimdall-cache = { workspace = true }
 heimdall-core = { workspace = true }
-heimdall-common = { workspace = true }
+heimdall-common = { workspace = true, features = ["network"] }
 heimdall-config = { workspace = true }
 tokio.workspace = true
 serde.workspace = true

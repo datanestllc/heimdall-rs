@@ -16,6 +16,10 @@ bench = false
 [lints]
 workspace = true
 
+[features]
+# RPC, Etherscan, signature resolution and LLM calls; off by default
+network = ["heimdall-common/network", "heimdall-vm/network"]
+
 [dependencies]
 heimdall-config = { workspace = true }
 heimdall-common = { workspace = true }

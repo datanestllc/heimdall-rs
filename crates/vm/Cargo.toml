@@ -17,7 +17,6 @@ bench = false
 workspace = true
 
 [dependencies]
-async-openai.workspace = true
 clap = { workspace = true, features = ["derive"] }
 colored.workspace = true
 crossbeam-channel.workspace = true
@@ -26,7 +25,6 @@ heimdall-cache = { workspace = true }
 indicatif.workspace = true
 lazy_static.workspace = true
 rand.workspace = true
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -34,7 +32,6 @@ strsim.workspace = true
 async-recursion.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
-backoff.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 eyre.workspace = true
@@ -45,6 +42,8 @@ once_cell.workspace = true
 paste = { workspace = true }
 
 [features]
+# selector resolution through the openchain signature database (heimdall-common)
+network = ["heimdall-common/network"]
 step-tracing = []
 experimental = []
 

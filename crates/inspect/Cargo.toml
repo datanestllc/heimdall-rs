@@ -18,9 +18,9 @@ workspace = true
 
 [dependencies]
 heimdall-config = { workspace = true }
-heimdall-common = { workspace = true }
+heimdall-common = { workspace = true, features = ["network"] }
 heimdall-cache = { workspace = true }
-heimdall-decoder = { workspace = true }
+heimdall-decoder = { workspace = true, features = ["network"] }
 thiserror.workspace = true
 clap = { workspace = true, features = ["derive"] }
 derive_builder.workspace = true

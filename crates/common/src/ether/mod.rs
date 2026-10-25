@@ -1,8 +1,11 @@
 pub mod bytecode;
 pub mod calldata;
 pub mod compiler;
+#[cfg(feature = "network")]
 pub mod etherscan;
+#[cfg(feature = "network")]
 pub mod provider;
+#[cfg(feature = "network")]
 pub mod rpc;
 pub mod signatures;
 pub mod tokenize;

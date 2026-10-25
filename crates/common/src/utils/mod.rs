@@ -5,6 +5,7 @@ pub mod env;
 pub mod hex;
 
 /// HTTP request and response handling utilities.
+#[cfg(feature = "network")]
 pub mod http;
 
 /// Integer manipulation and formatting utilities.

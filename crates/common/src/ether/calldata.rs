@@ -1,11 +1,19 @@
 //! Module for fetching calldata from a target.
+#[cfg(feature = "network")]
 use super::rpc::get_transaction;
 use crate::utils::strings::decode_hex;
+#[cfg(feature = "network")]
 use alloy::{consensus::Transaction, primitives::TxHash};
-use eyre::{bail, eyre, Result};
+#[cfg(feature = "network")]
+use eyre::eyre;
+use eyre::{bail, Result};
 /// Given a target, return calldata of the target.
 pub async fn get_calldata_from_target(target: &str, raw: bool, rpc_url: &str) -> Result<Vec<u8>> {
-    // If the target is a transaction hash, fetch the calldata from the RPC provider.
+    // If the target is a transaction hash, fetch the calldata from the RPC provider. Without the
+    // `network` feature a target is only ever calldata.
+    #[cfg(not(feature = "network"))]
+    let _ = (raw, rpc_url);
+    #[cfg(feature = "network")]
     if let Ok(address) = target.parse::<TxHash>() {
         // if raw is true, the user specified that the target is raw calldata. skip fetching the
         // transaction.
@@ -29,6 +37,7 @@ pub async fn get_calldata_from_target(target: &str, raw: bool, rpc_url: &str) ->
 mod tests {
     use super::*;
 
+    #[cfg(feature = "network")]
     #[tokio::test]
     async fn test_get_calldata_when_target_is_txhash() {
         let rpc_url = std::env::var("RPC_URL").unwrap_or_else(|_| {

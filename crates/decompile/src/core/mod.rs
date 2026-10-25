@@ -1,6 +1,7 @@
 pub(crate) mod analyze;
 mod calldata;
 pub(crate) mod control_flow;
+#[cfg(feature = "network")]
 mod event_logs;
 pub(crate) mod ir;
 pub(crate) mod out;
@@ -133,7 +134,14 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
     }
 
     if args.indexed_log_check {
+        #[cfg(feature = "network")]
         event_logs::validate_lookup(&args)?;
+        #[cfg(not(feature = "network"))]
+        return Err(Error::Eyre(eyre!("the indexed log lookup needs the `network` feature")));
+    }
+    #[cfg(not(feature = "network"))]
+    if args.llm_postprocess {
+        return Err(Error::Eyre(eyre!("llm postprocessing needs the `network` feature")));
     }
 
     let analyzer_type = AnalyzerType::from_args(args.include_solidity, args.include_yul);
@@ -534,7 +542,9 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
         .collect::<HashMap<_, _>>();
 
     // construct the abi for the given analyzed functions
+    #[cfg_attr(not(feature = "network"), allow(unused_mut))]
     let mut abi = build_abi(&analyzed_functions, &all_resolved_errors, &all_resolved_events)?;
+    #[cfg(feature = "network")]
     if args.indexed_log_check && event_logs::recover_event_indexing(&mut abi, &args).await.is_err()
     {
         // Provider errors can contain credentials from the RPC URL.
@@ -832,6 +842,35 @@ mod tests {
         let call = exec.effects.iter().find(|e| e.opcode == opcodes::CALL).unwrap();
         assert_eq!(call.selector, Some(crate::EffectOperand::Dynamic));
         assert_eq!(call.target, Some(crate::EffectOperand::Arg(0)));
+    }
+
+    /// Without the `network` feature, asking for name resolution, a log lookup or LLM
+    /// postprocessing reaches no network: names stay unresolved, the others are refused.
+    #[cfg(not(feature = "network"))]
+    #[tokio::test]
+    async fn without_network_nothing_leaves_the_process() {
+        let build = |skip_resolving: bool, indexed_log_check: bool, llm_postprocess: bool| {
+            DecompilerArgsBuilder::new()
+                .target(EFFECTS.to_string())
+                .skip_resolving(skip_resolving)
+                .include_solidity(true)
+                .indexed_log_check(indexed_log_check)
+                .llm_postprocess(llm_postprocess)
+                .openrouter_api_key("key".to_string())
+                .rpc_url("http://127.0.0.1:9".to_string())
+                .hardfork(HardFork::Auto)
+                .build()
+                .unwrap()
+        };
+
+        // selector, event and error resolution would ask openchain; Auto would ask the RPC
+        let result = decompile(build(false, false, false)).await.unwrap();
+        let source = result.source.unwrap();
+        assert!(source.contains("function Unresolved_a9059cbb("), "{source}");
+        assert!(source.contains("event Event_ddf252ad"), "{source}");
+
+        assert!(decompile(build(true, true, false)).await.is_err());
+        assert!(decompile(build(true, false, true)).await.is_err());
     }
 
     #[tokio::test]

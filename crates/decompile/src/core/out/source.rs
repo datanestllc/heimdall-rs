@@ -4,24 +4,34 @@ use std::{collections::BTreeSet, str::FromStr, time::Instant};
 use alloy::primitives::U256;
 use alloy_json_abi::{JsonAbi, StateMutability};
 
-use eyre::{OptionExt, Result};
+use eyre::Result;
+#[cfg(feature = "network")]
+use eyre::OptionExt;
 use heimdall_common::{
     ether::signatures::{ResolvedError, ResolvedLog},
-    resources::openrouter::{complete_chat_structured, AnnotatedContractResponse},
     utils::{hex::ToLowerHex, strings::encode_hex_reduced},
 };
+#[cfg(feature = "network")]
+use heimdall_common::resources::openrouter::{complete_chat_structured, AnnotatedContractResponse};
 
 use tracing::debug;
 
 use crate::{
     core::{analyze::AnalyzerType, postprocess::getter_type_matches, types::SolidityType},
     interfaces::AnalyzedFunction,
-    utils::constants::{
-        DECOMPILED_SOURCE_HEADER_SOL, DECOMPILED_SOURCE_HEADER_YUL, LLM_POSTPROCESSING_PROMPT,
-    },
+    utils::constants::{DECOMPILED_SOURCE_HEADER_SOL, DECOMPILED_SOURCE_HEADER_YUL},
 };
+#[cfg(feature = "network")]
+use crate::utils::constants::LLM_POSTPROCESSING_PROMPT;
+
+/// Annotates the entire contract source code using an LLM: not available without `network`.
+#[cfg(not(feature = "network"))]
+async fn annotate_contract(_source: &str, _openrouter_api_key: &str, _model: &str) -> Result<String> {
+    eyre::bail!("llm postprocessing needs the `network` feature")
+}
 
 /// Annotates the entire contract source code using an LLM with structured output.
+#[cfg(feature = "network")]
 async fn annotate_contract(source: &str, openrouter_api_key: &str, model: &str) -> Result<String> {
     let response: AnnotatedContractResponse = complete_chat_structured(
         &LLM_POSTPROCESSING_PROMPT.replace("{source}", source),

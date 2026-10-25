@@ -1,7 +1,9 @@
 use std::fmt::Display;
 
+#[cfg(feature = "network")]
 use eyre::Result;
 
+#[cfg(feature = "network")]
 use super::http::get_json_from_url;
 
 #[derive(Debug)]
@@ -40,6 +42,7 @@ pub fn current_version() -> Version {
 }
 
 /// get the latest version from github
+#[cfg(feature = "network")]
 pub async fn remote_version() -> Result<Version> {
     // get the latest release from github
     let remote_repository_url =
@@ -66,6 +69,7 @@ pub async fn remote_version() -> Result<Version> {
 }
 
 /// get the latest nightly version from github
+#[cfg(feature = "network")]
 pub async fn remote_nightly_version() -> Result<Version> {
     // get the latest commit to main from github
     let remote_repository_url = "https://api.github.com/repos/Jon-Becker/heimdall-rs/commits/main";
@@ -245,6 +249,7 @@ mod tests {
         assert_eq!(version.to_string(), env!("CARGO_PKG_VERSION"));
     }
 
+    #[cfg(feature = "network")]
     #[tokio::test]
     async fn test_version_remote() {
         let version = remote_version().await;
@@ -252,6 +257,7 @@ mod tests {
         assert!(version.is_ok());
     }
 
+    #[cfg(feature = "network")]
     #[tokio::test]
     async fn test_version_remote_nightly() {
         let version = remote_nightly_version().await;
