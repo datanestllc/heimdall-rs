@@ -4,7 +4,10 @@ use derive_builder::Builder;
 use eyre::Result;
 use heimdall_common::ether::bytecode::get_bytecode_from_target;
 use heimdall_config::parse_url_arg;
-use heimdall_vm::{core::hardfork::HardFork, ext::exec::ExecBudget};
+use heimdall_vm::{
+    core::hardfork::HardFork,
+    ext::exec::{ExecBudget, ExecStats},
+};
 use std::{
     collections::BTreeMap,
     time::{Duration, Instant},
@@ -112,6 +115,13 @@ pub struct DecompilerArgs {
     #[builder(default)]
     pub state_budget_bytes: u64,
 
+    /// Deterministic budget: approximate bytes of saved VM states of all functions together
+    /// (0 = unlimited). Every function's trace is kept until analysis, so this bounds the memory
+    /// of the job.
+    #[clap(long, default_value = "0", hide_default_value = true)]
+    #[builder(default)]
+    pub job_state_budget_bytes: u64,
+
     /// Wall-clock emergency stop for the whole decompilation in milliseconds (0 = none). Unlike
     /// the budgets above, it depends on machine load.
     #[clap(long, default_value = "0", hide_default_value = true)]
@@ -161,15 +171,17 @@ pub struct DecompilerArgs {
 }
 
 impl DecompilerArgs {
-    /// The symbolic execution budget for one function, given the steps the job has used so far
-    /// and the job's wall-clock deadline.
+    /// The symbolic execution budget for one function, given what the job has used so far and
+    /// the job's wall-clock deadline.
     pub(crate) fn function_budget(
         &self,
-        job_steps_used: u64,
+        job_used: &ExecStats,
         job_deadline: Option<Instant>,
     ) -> ExecBudget {
         let unlimited = |n: u64| if n == 0 { u64::MAX } else { n };
-        let job_left = unlimited(self.job_step_budget).saturating_sub(job_steps_used);
+        let job_left = unlimited(self.job_step_budget).saturating_sub(job_used.steps);
+        let job_bytes_left =
+            unlimited(self.job_state_budget_bytes).saturating_sub(job_used.state_bytes);
         let function_deadline = Instant::now().checked_add(Duration::from_millis(self.timeout));
         let deadline = match (function_deadline, job_deadline) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -178,7 +190,7 @@ impl DecompilerArgs {
         ExecBudget {
             max_steps: unlimited(self.step_budget).min(job_left),
             max_branches: if self.branch_budget == 0 { u32::MAX } else { self.branch_budget },
-            max_state_bytes: unlimited(self.state_budget_bytes),
+            max_state_bytes: unlimited(self.state_budget_bytes).min(job_bytes_left),
             deadline,
         }
     }
@@ -267,6 +279,7 @@ impl DecompilerArgsBuilder {
             job_step_budget: Some(0),
             branch_budget: Some(0),
             state_budget_bytes: Some(0),
+            job_state_budget_bytes: Some(0),
             job_timeout: Some(0),
             abi: Some(None),
             selector_abi: Some(None),

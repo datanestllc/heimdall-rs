@@ -26,7 +26,10 @@ use heimdall_common::{
 use heimdall_disassembler::{disassemble, DisassemblerArgsBuilder};
 use heimdall_vm::{
     core::vm::VM,
-    ext::selectors::{find_function_selectors, resolve_selectors},
+    ext::{
+        exec::ExecStats,
+        selectors::{find_function_selectors, resolve_selectors},
+    },
 };
 use futures::FutureExt;
 use std::{
@@ -194,7 +197,7 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
     let job_deadline = (args.job_timeout > 0)
         .then(|| start_time.checked_add(Duration::from_millis(args.job_timeout)))
         .flatten();
-    let mut job_steps_used = 0u64;
+    let mut job_used = ExecStats::default();
     let mut reports: HashMap<String, FunctionReport> = HashMap::new();
 
     let mut symbolic_execution_maps = HashMap::new();
@@ -202,9 +205,10 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
         warn!("discovered no function selectors in the bytecode.");
         let start_sym_exec_time = Instant::now();
         let (map, stats) = evm
-            .symbolic_exec_with_budget(args.function_budget(job_steps_used, job_deadline))
+            .symbolic_exec_with_budget(args.function_budget(&job_used, job_deadline))
             .map_err(|e| Error::Eyre(eyre!("symbolic execution failed: {}", e)))?;
-        job_steps_used += stats.steps;
+        job_used.steps += stats.steps;
+        job_used.state_bytes += stats.state_bytes;
 
         debug!("symbolic execution (fallback) took {:?}", start_sym_exec_time.elapsed());
         debug!("'fallback' has {} unique branches", stats.branches);
@@ -234,9 +238,10 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
         for (entry, calldata) in [("fallback", unmatched), ("receive", Vec::new())] {
             let mut entry_evm = evm.clone();
             let (map, stats) = entry_evm
-                .symbolic_exec_entry(&calldata, args.function_budget(job_steps_used, job_deadline))
+                .symbolic_exec_entry(&calldata, args.function_budget(&job_used, job_deadline))
                 .map_err(|e| Error::Eyre(eyre!("symbolic execution failed: {}", e)))?;
-            job_steps_used += stats.steps;
+            job_used.steps += stats.steps;
+            job_used.state_bytes += stats.state_bytes;
             debug!("'{}' has {} unique branches", entry, stats.branches);
             reports.insert(entry.to_string(), FunctionReport::explored(entry, &map, stats));
             symbolic_execution_maps.insert(entry.to_string(), map);
@@ -249,7 +254,7 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
         let (map, stats) = match function_evm.symbolic_exec_selector_with_budget(
             &selector,
             entry_point,
-            args.function_budget(job_steps_used, job_deadline),
+            args.function_budget(&job_used, job_deadline),
         ) {
             Ok(map) => map,
             Err(e) => {
@@ -261,7 +266,8 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
                 continue;
             }
         };
-        job_steps_used += stats.steps;
+        job_used.steps += stats.steps;
+        job_used.state_bytes += stats.state_bytes;
         debug!("symbolically executed '{}' in {:?}", selector, start_sym_exec_time.elapsed());
         debug!("'{}' has {} unique branches", selector, stats.branches);
         reports.insert(selector.clone(), FunctionReport::explored(&selector, &map, stats));
@@ -675,6 +681,31 @@ mod tests {
         let source = result.source.unwrap();
         assert!(source.contains("fallback() external payable {"), "{source}");
         assert!(source.contains("receive() external payable {"), "{source}");
+    }
+
+    #[tokio::test]
+    async fn the_job_budget_is_shared_in_selector_order() {
+        use crate::BodyStatus;
+
+        // as in `a_failing_function_does_not_fail_the_contract`: 0x11111111 is an endless jump
+        // loop that uses up the job budget, so 0x22222222, explored after it, gets nothing left
+        let code = "60003560e01c8063111111111461001c5763222222221461002157005b61001c565b00";
+        let args = DecompilerArgsBuilder::new()
+            .target(code.to_string())
+            .skip_resolving(true)
+            .include_solidity(true)
+            .hardfork(HardFork::Fusaka)
+            .job_step_budget(500)
+            .build()
+            .unwrap();
+        let result = decompile(args).await.unwrap();
+        let steps = |sel: &str| {
+            result.functions.iter().find(|f| f.selector == sel).map(|f| f.stats.steps).unwrap()
+        };
+        assert_eq!(steps("11111111"), 500);
+        assert_eq!(steps("22222222"), 0);
+        let last = result.functions.iter().find(|f| f.selector == "22222222").unwrap();
+        assert_eq!(last.status, BodyStatus::Partial);
     }
 
     #[tokio::test]
