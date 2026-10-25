@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use heimdall_vm::ext::exec::{ExecStats, TruncationReason, VMTrace};
 
 use crate::interfaces::Effect;
@@ -50,13 +52,22 @@ pub struct FunctionReport {
     /// Effectful opcodes of the analyzed paths, sorted by PC; kept when the analysis fails part
     /// way.
     pub effects: Vec<Effect>,
-    /// 0-based PCs of every analyzed instruction, sorted.
+    /// 0-based PCs of every analyzed instruction, sorted: what the rendered body covers.
     pub executed_pcs: Vec<u128>,
+    /// 0-based PCs of every instruction the symbolic execution ran, sorted. A superset of
+    /// `executed_pcs`: analysis drops the side of a JUMPI whose condition is a constant.
+    pub explored_pcs: Vec<u128>,
 }
 
 impl FunctionReport {
     /// The report for a function whose body was symbolically executed into `trace`.
     pub(crate) fn explored(selector: &str, trace: &VMTrace, stats: ExecStats) -> Self {
+        fn walk(trace: &VMTrace, pcs: &mut BTreeSet<u128>) {
+            pcs.extend(trace.operations.iter().map(|op| op.last_instruction.instruction - 1));
+            trace.children.iter().for_each(|child| walk(child, pcs));
+        }
+        let mut explored = BTreeSet::new();
+        walk(trace, &mut explored);
         Self {
             selector: selector.to_string(),
             entry_pc: Some(trace.instruction.saturating_sub(1)),
@@ -65,6 +76,7 @@ impl FunctionReport {
             stats,
             effects: Vec::new(),
             executed_pcs: Vec::new(),
+            explored_pcs: explored.into_iter().collect(),
         }
     }
 
@@ -78,6 +90,7 @@ impl FunctionReport {
             stats: ExecStats::default(),
             effects: Vec::new(),
             executed_pcs: Vec::new(),
+            explored_pcs: Vec::new(),
         }
     }
 }

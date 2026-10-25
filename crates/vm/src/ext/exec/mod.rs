@@ -5,7 +5,7 @@ use crate::{
     core::{
         opcodes::{
             WrappedInput, WrappedOpcode, ADD, AND, CALLDATALOAD, CALLDATASIZE, DIV, EQ, GT, ISZERO,
-            LT, MOD, MUL, NOT, OR, PUSH0, PUSH32, SGT, SHL, SHR, SLT, SUB, XOR,
+            JUMPDEST, LT, MOD, MUL, NOT, OR, PUSH0, PUSH1, PUSH32, SGT, SHL, SHR, SLT, SUB, XOR,
         },
         stack::Stack,
         vm::{State, VM},
@@ -94,6 +94,14 @@ pub struct ExecBudget {
     pub max_state_bytes: u64,
     /// Wall-clock emergency stop.
     pub deadline: Option<Instant>,
+    /// Loop detection by calling context. Off: upstream heuristics, which compare a JUMPI with
+    /// its earlier visits on any path by stack shape, so two paths through shared code (an
+    /// internal function called from two places) cut each other as "loops" and the second
+    /// caller's continuation is lost. On: a JUMPI is explored once per calling context, i.e. per
+    /// set of return addresses on the stack (with the same stack depth and direction taken); a
+    /// later visit in the same context is cut, on any path. A loop body is then explored once,
+    /// and a helper once per call site.
+    pub context_loops: bool,
 }
 
 impl ExecBudget {
@@ -104,6 +112,7 @@ impl ExecBudget {
             max_branches: u32::MAX,
             max_state_bytes: u64::MAX,
             deadline: None,
+            context_loops: false,
         }
     }
 
@@ -130,6 +139,8 @@ pub struct ExecStats {
     pub state_bytes: u64,
     /// Paths cut short, by reason.
     pub truncations: BTreeMap<TruncationReason, u32>,
+    /// Paths cut by a loop heuristic, by heuristic.
+    pub loop_heuristics: BTreeMap<&'static str, u32>,
 }
 
 impl ExecStats {
@@ -191,6 +202,44 @@ pub fn is_decided_by_dispatch(condition: &WrappedOpcode) -> bool {
     !condition.is_too_large_to_expand() && walk(condition, &mut reads) && reads
 }
 
+/// A JUMPI visit as loop detection with `context_loops` sees it: the jump, the direction the VM
+/// takes, the stack depth, and the calling context, i.e. the stack items that are code addresses
+/// (JUMPDESTs pushed as constants: return addresses of internal functions). The same helper
+/// called from two call sites differs in its return address; one loop iteration and the next do
+/// not; data values (counters, amounts) are not part of it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ContextKey {
+    pc: u128,
+    jumpdest: U256,
+    jump_taken: bool,
+    stack_depth: usize,
+    context: Vec<U256>,
+}
+
+impl ContextKey {
+    fn new(frame: &JumpFrame, stack: &Stack, bytecode: &[u8]) -> Self {
+        let context = stack
+            .stack
+            .iter()
+            .filter(|item| (PUSH1..=PUSH32).contains(&item.operation.opcode))
+            .filter(|item| {
+                usize::try_from(item.value)
+                    .ok()
+                    .and_then(|pc| bytecode.get(pc))
+                    .is_some_and(|op| *op == JUMPDEST)
+            })
+            .map(|item| item.value)
+            .collect();
+        Self {
+            pc: frame.pc,
+            jumpdest: frame.jumpdest,
+            jump_taken: frame.jump_taken,
+            stack_depth: frame.stack_depth,
+            context,
+        }
+    }
+}
+
 /// Approximate heap bytes of one saved [`State`]: memory, stack frames, storage and logs.
 pub fn approximate_state_bytes(state: &State) -> u64 {
     let memory = state.memory.memory.len() as u64;
@@ -211,11 +260,18 @@ struct ExecContext {
     /// Follow only the side the VM takes at a JUMPI decided by the selector or the calldata size
     /// (see [`VM::symbolic_exec_entry`]).
     follow_dispatch: bool,
+    /// JUMPI visits explored so far, by calling context (`context_loops`).
+    explored_contexts: hashbrown::HashSet<ContextKey>,
 }
 
 impl ExecContext {
     fn new(budget: ExecBudget) -> Self {
-        Self { budget, stats: ExecStats::default(), follow_dispatch: false }
+        Self {
+            budget,
+            stats: ExecStats::default(),
+            follow_dispatch: false,
+            explored_contexts: hashbrown::HashSet::new(),
+        }
     }
 
     /// The first exhausted budget, if any.
@@ -230,6 +286,12 @@ impl ExecContext {
             return Some(TruncationReason::StateBudget);
         }
         None
+    }
+
+    /// Cut `trace` short at `pc` by the named loop heuristic, and count it.
+    fn cut_loop(&mut self, trace: VMTrace, heuristic: &'static str, pc: u128) -> VMTrace {
+        *self.stats.loop_heuristics.entry(heuristic).or_insert(0) += 1;
+        self.truncate(trace, TruncationReason::LoopHeuristic, pc)
     }
 
     /// Mark `trace` as cut short at `pc` and count it.
@@ -491,24 +553,30 @@ impl VM {
 
                 // if the stack contains too many items, it's probably a loop
                 if stack_contains_too_many_items(&vm.stack) {
-                    return ctx.truncate(vm_trace, TruncationReason::LoopHeuristic, jumpi_pc);
+                    return ctx.cut_loop(vm_trace, "stack_too_large", jumpi_pc);
                 }
 
                 // if the stack has over 16 items of the same source, it's probably a loop
                 if stack_contains_too_many_of_the_same_item(&vm.stack) {
-                    return ctx.truncate(vm_trace, TruncationReason::LoopHeuristic, jumpi_pc);
+                    return ctx.cut_loop(vm_trace, "repeated_stack_items", jumpi_pc);
                 }
 
                 // if any item on the stack has a depth > 16, it's probably a loop (because of stack
                 // too deep)
                 if stack_item_source_depth_too_deep(&vm.stack) {
-                    return ctx.truncate(vm_trace, TruncationReason::LoopHeuristic, jumpi_pc);
+                    return ctx.cut_loop(vm_trace, "expression_too_deep", jumpi_pc);
                 }
 
+                if ctx.budget.context_loops {
+                    let key = ContextKey::new(&jump_frame, &vm.stack, &vm.bytecode);
+                    if !ctx.explored_contexts.insert(key) {
+                        return ctx.cut_loop(vm_trace, "explored_context", jumpi_pc);
+                    }
+                } else {
                 // if the jump stack depth is less than the max stack depth of all previous matching
                 // jumps, it's probably a loop
                 if jump_stack_depth_less_than_max_stack_depth(&jump_frame, handled_jumps) {
-                    return ctx.truncate(vm_trace, TruncationReason::LoopHeuristic, jumpi_pc);
+                    return ctx.cut_loop(vm_trace, "shallower_stack", jumpi_pc);
                 }
 
                 // perform heuristic checks on historical stacks
@@ -573,7 +641,7 @@ impl VM {
 
                             // this key exists, but the stack is different, so the jump is new
                             historical_stacks.push(vm.stack.clone());
-                            return ctx.truncate(vm_trace, TruncationReason::LoopHeuristic, jumpi_pc);
+                            return ctx.cut_loop(vm_trace, "seen_or_changing_condition", jumpi_pc);
                         }
 
                         // check if any stack position shows a consistent pattern
@@ -588,11 +656,7 @@ impl VM {
 
                             // this key exists, but the stack is different, so the jump is new
                             historical_stacks.push(vm.stack.clone());
-                            return ctx.truncate(
-                                vm_trace,
-                                TruncationReason::LoopHeuristic,
-                                jumpi_pc,
-                            );
+                            return ctx.cut_loop(vm_trace, "stack_pattern", jumpi_pc);
                         }
 
                         if historical_diffs_approximately_equal(&vm.stack, historical_stacks) {
@@ -605,11 +669,7 @@ impl VM {
 
                             // this key exists, but the stack is different, so the jump is new
                             historical_stacks.push(vm.stack.clone());
-                            return ctx.truncate(
-                                vm_trace,
-                                TruncationReason::LoopHeuristic,
-                                jumpi_pc,
-                            );
+                            return ctx.cut_loop(vm_trace, "similar_stack_diffs", jumpi_pc);
                         }
 
                         {
@@ -632,8 +692,9 @@ impl VM {
                     None => {
                         // this key doesnt exist, so the jump is new
                         trace!("added new jump frame: {:?}", jump_frame);
-                        handled_jumps.insert(jump_frame, vec![vm.stack.clone()]);
+                        handled_jumps.insert(jump_frame.clone(), vec![vm.stack.clone()]);
                     }
+                }
                 }
 
                 if last_instruction.opcode == 0x56 {
@@ -796,6 +857,39 @@ mod tests {
         assert_eq!(stats.branches, 0);
         assert_eq!(trace.children.len(), 1);
         assert_eq!(trace.children[0].instruction, 28);
+    }
+
+    fn executes(trace: &VMTrace, opcode: u8) -> bool {
+        trace.operations.iter().any(|s| s.last_instruction.opcode == opcode) ||
+            trace.children.iter().any(|child| executes(child, opcode))
+    }
+
+    #[test]
+    fn context_loops_explore_a_helper_once_per_call_site() {
+        // 0: PUSH1 0xaa PUSH1 7 PUSH1 21 JUMP          -- helper(), returning to 7, stack depth 2
+        // 7: JUMPDEST POP PUSH1 14 PUSH1 21 JUMP        -- helper() again, returning to 14, depth 1
+        // 14: JUMPDEST PUSH1 1 PUSH1 0 SSTORE STOP      -- only after the second call
+        // 21: JUMPDEST PUSH1 0 CALLDATALOAD PUSH1 28 JUMPI  28: JUMPDEST JUMP   -- the helper
+        let code = "60aa60076015565b50600e6015565b6001600055005b600035601c575b56";
+
+        // upstream: the second visit of the helper's JUMPI has a shallower stack than the first,
+        // so it is taken for a loop, and the code after the second call is never reached
+        let (trace, stats) = vm(code).symbolic_exec_with_budget(ExecBudget::unlimited()).unwrap();
+        assert!(!executes(&trace, SSTORE));
+        assert_eq!(stats.loop_heuristics.get("shallower_stack"), Some(&2));
+
+        // by calling context, the two calls return to different places, so both are explored
+        let budget = ExecBudget { context_loops: true, ..ExecBudget::unlimited() };
+        let (trace, stats) = vm(code).symbolic_exec_with_budget(budget).unwrap();
+        assert!(executes(&trace, SSTORE));
+        // the sibling path of the first call reaches the second call in a context already
+        // explored: that is the only cut
+        assert_eq!(stats.loop_heuristics.keys().collect::<Vec<_>>(), vec![&"explored_context"]);
+
+        // a real loop is still cut, after one pass
+        let budget = ExecBudget { context_loops: true, ..ExecBudget::unlimited() };
+        let (_, stats) = vm("5b600160005560003560005700").symbolic_exec_with_budget(budget).unwrap();
+        assert_eq!(stats.loop_heuristics.get("explored_context"), Some(&1));
     }
 
     #[test]

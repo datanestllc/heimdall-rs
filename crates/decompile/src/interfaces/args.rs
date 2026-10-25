@@ -124,6 +124,13 @@ pub struct DecompilerArgs {
     #[builder(default)]
     pub job_state_budget_bytes: u64,
 
+    /// Loop detection by calling context instead of the upstream stack-shape heuristics: each
+    /// JUMPI is explored once per set of return addresses on the stack (see
+    /// `ExecBudget::context_loops`). Deterministic, within the same budgets.
+    #[clap(long)]
+    #[builder(default)]
+    pub context_loops: bool,
+
     /// Wall-clock emergency stop for the whole decompilation in milliseconds (0 = none). Unlike
     /// the budgets above, it depends on machine load.
     #[clap(long, default_value = "0", hide_default_value = true)]
@@ -203,6 +210,7 @@ impl DecompilerArgs {
             max_branches: if self.branch_budget == 0 { u32::MAX } else { self.branch_budget },
             max_state_bytes: unlimited(self.state_budget_bytes).min(job_bytes_left),
             deadline,
+            context_loops: self.context_loops,
         }
     }
 
@@ -292,6 +300,7 @@ impl DecompilerArgsBuilder {
             state_budget_bytes: Some(0),
             job_state_budget_bytes: Some(0),
             job_timeout: Some(0),
+            context_loops: Some(false),
             abi: Some(None),
             selector_abi: Some(None),
             fallback_entries: Some(false),
