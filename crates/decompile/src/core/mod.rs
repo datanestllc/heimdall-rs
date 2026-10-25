@@ -212,11 +212,15 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
         symbolic_execution_maps.insert("fallback".to_string(), map);
     }
 
+    // explore selectors in sorted order, each on a fresh copy of the initial VM: `reset()` keeps
+    // storage, so one function's SSTOREs used to steer the next, in hash-map order
+    let mut selectors = selectors.into_iter().collect::<Vec<_>>();
+    selectors.sort();
     let overall_sym_exec_time = Instant::now();
     for (selector, entry_point) in selectors {
         let start_sym_exec_time = Instant::now();
-        evm.reset();
-        let (map, stats) = match evm.symbolic_exec_selector_with_budget(
+        let mut function_evm = evm.clone();
+        let (map, stats) = match function_evm.symbolic_exec_selector_with_budget(
             &selector,
             entry_point,
             args.function_budget(job_steps_used, job_deadline),
@@ -594,6 +598,26 @@ mod tests {
         assert_eq!(status("22222222").status, BodyStatus::Done);
         let source = result.source.unwrap();
         assert!(source.contains("22222222") && !source.contains("11111111"), "{source}");
+    }
+
+    #[tokio::test]
+    async fn storage_does_not_leak_between_functions() {
+        // 0x11111111 (pc 28) stores 41 in slot 0. 0x22222222 (pc 36) jumps to sload(0); only a
+        // leaked 41 reaches the LOG0 at pc 41.
+        let code = "60003560e01c8063111111111461001c5763222222221461002457005b610029600055005b600054565b60006000a000";
+        for _ in 0..4 {
+            let args = DecompilerArgsBuilder::new()
+                .target(code.to_string())
+                .skip_resolving(true)
+                .include_solidity(true)
+                .hardfork(HardFork::Fusaka)
+                .step_budget(2000)
+                .build()
+                .unwrap();
+            let result = decompile(args).await.unwrap();
+            let reader = result.functions.iter().find(|f| f.selector == "22222222").unwrap();
+            assert!(!reader.executed_pcs.contains(&41), "{reader:?}");
+        }
     }
 
     #[tokio::test]
