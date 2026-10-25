@@ -107,21 +107,21 @@ unnecessary_struct_initialization = "allow"
 use_self = "allow"
 
 [workspace.dependencies]
-heimdall-core = { path = "crates/core" }
-heimdall-cache = { path = "crates/cache" }
-heimdall-cli = { path = "crates/cli" }
-heimdall-common = { path = "crates/common" }
-heimdall-config = { path = "crates/config" }
-heimdall-tracing = { path = "crates/tracing" }
+heimdall-core = { path = "crates/core", version = "0.9.2" }
+heimdall-cache = { path = "crates/cache", version = "0.9.2" }
+heimdall-cli = { path = "crates/cli", version = "0.9.2" }
+heimdall-common = { path = "crates/common", version = "0.9.2" }
+heimdall-config = { path = "crates/config", version = "0.9.2" }
+heimdall-tracing = { path = "crates/tracing", version = "0.9.2" }
 
 # core mods
-heimdall-cfg = { path = "crates/cfg" }
-heimdall-dump = { path = "crates/dump" }
-heimdall-inspect = { path = "crates/inspect" }
-heimdall-decoder = { path = "crates/decode" }
-heimdall-decompiler = { path = "crates/decompile" }
-heimdall-disassembler = { path = "crates/disassemble" }
-heimdall-vm = { path = "crates/vm" }
+heimdall-cfg = { path = "crates/cfg", version = "0.9.2" }
+heimdall-dump = { path = "crates/dump", version = "0.9.2" }
+heimdall-inspect = { path = "crates/inspect", version = "0.9.2" }
+heimdall-decoder = { path = "crates/decode", version = "0.9.2" }
+heimdall-decompiler = { path = "crates/decompile", version = "0.9.2" }
+heimdall-disassembler = { path = "crates/disassemble", version = "0.9.2" }
+heimdall-vm = { path = "crates/vm", version = "0.9.2" }
 
 clap = { version = "4", features = ["derive"] }
 thiserror = "1.0.50"
