@@ -22,6 +22,7 @@ use crate::{
         },
     },
 };
+use crate::ext::selectors::MAX_DISPATCH_STEPS;
 use alloy::primitives::U256;
 use eyre::Result;
 use hashbrown::HashMap;
@@ -354,6 +355,52 @@ impl VM {
         if trace.operations.is_empty() && trace.children.is_empty() {
             warn!("symbolic execution returned no valid traces");
         }
+        Ok((trace, ctx.stats))
+    }
+
+    /// Run symbolic execution for a function whose body starts at `entry_pc`, a 0-based bytecode
+    /// offset (e.g. evmole's `bytecodeOffset`), with the given calldata.
+    ///
+    /// The VM first executes concretely from its current position until the next instruction is
+    /// the one at `entry_pc`, for at most [`MAX_DISPATCH_STEPS`] steps (they also count against the
+    /// step budget). Symbolic execution starts exactly there. If the VM halts, fails or runs out of
+    /// steps before, the error says `entry_not_reached`.
+    ///
+    /// Heimdall's `instruction` counts from 1; `entry_pc` counts from 0, like a program counter.
+    pub fn symbolic_exec_from_entry(
+        &mut self,
+        calldata: &[u8],
+        entry_pc: u128,
+        budget: ExecBudget,
+    ) -> Result<(VMTrace, ExecStats)> {
+        self.calldata = calldata.to_vec();
+        let mut ctx = ExecContext::new(budget);
+        let entry_instruction = entry_pc.saturating_add(1);
+
+        let mut steps = 0usize;
+        while self.instruction != entry_instruction {
+            if steps >= MAX_DISPATCH_STEPS {
+                eyre::bail!("entry_not_reached: no pc {entry_pc:#x} within {MAX_DISPATCH_STEPS} steps");
+            }
+            if self.bytecode.len() < self.instruction as usize {
+                eyre::bail!("entry_not_reached: execution left the code before pc {entry_pc:#x}");
+            }
+            let pc = self.instruction.saturating_sub(1);
+            if let Some(reason) = ctx.exhausted() {
+                let root = VMTrace { instruction: self.instruction, ..Default::default() };
+                return Ok((ctx.truncate(root, reason, pc), ctx.stats));
+            }
+            steps += 1;
+            ctx.stats.steps += 1;
+            if let Err(e) = self.step() {
+                eyre::bail!("entry_not_reached: execution failed at pc {pc:#x}: {e}");
+            }
+            if self.exitcode != 255 || !self.returndata.is_empty() {
+                eyre::bail!("entry_not_reached: execution halted at pc {pc:#x}");
+            }
+        }
+
+        let trace = self.recursive_map(&mut ctx, &mut HashMap::new());
         Ok((trace, ctx.stats))
     }
 

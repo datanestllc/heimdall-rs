@@ -132,6 +132,15 @@ pub struct DecompilerArgs {
     #[clap(long, short, default_value = None, hide_default_value = true)]
     pub abi: Option<String>,
 
+    /// Function entries for library callers: selector (8 lowercase hex characters, no `0x`) →
+    /// 0-based bytecode offset of the body, e.g. evmole's `bytecodeOffset`. For these selectors
+    /// the VM executes concretely until the pc is exactly the offset, then explores from there; a
+    /// body it cannot reach is reported `entry_not_reached`. Selectors found by heimdall itself
+    /// and not listed here keep its own dispatcher walk.
+    #[clap(skip)]
+    #[builder(default)]
+    pub entry_points: Option<BTreeMap<String, u128>>,
+
     /// Also explore the two entries that are not selectors, each from pc 0: empty calldata
     /// (`receive`) and a selector the dispatcher does not match (`fallback`). Dispatch on the
     /// selector or the calldata size follows that calldata; other branches fork as usual.
@@ -284,6 +293,7 @@ impl DecompilerArgsBuilder {
             abi: Some(None),
             selector_abi: Some(None),
             fallback_entries: Some(false),
+            entry_points: Some(None),
             llm_postprocess: Some(false),
             openrouter_api_key: Some(String::new()),
             model: Some(String::new()),

@@ -33,6 +33,7 @@ use heimdall_vm::{
 };
 use futures::FutureExt;
 use std::{
+    collections::BTreeMap,
     panic::AssertUnwindSafe,
     time::{Duration, Instant},
 };
@@ -53,6 +54,15 @@ use crate::{
     },
 };
 use tracing::{debug, info, warn};
+
+/// How the body of a selector is reached.
+#[derive(Clone, Copy, Debug)]
+enum Entry {
+    /// Heimdall's own walk of the dispatcher found this jump destination.
+    Walked(u128),
+    /// The caller supplied this 0-based entry offset; the VM steps until the pc is exactly there.
+    Supplied(u128),
+}
 
 /// Upper bound on VM steps when a constant function is executed for its value.
 const MAX_CONSTANT_CALL_STEPS: u64 = 100_000;
@@ -181,8 +191,16 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
 
     // find all the function selectors in the bytecode
     let start_selectors_time = Instant::now();
-    let selectors = find_function_selectors(&evm, &assembly);
+    let found = find_function_selectors(&evm, &assembly);
     debug!("finding function selectors took {:?}", start_selectors_time.elapsed());
+
+    // supplied entries win over the dispatcher walk; heimdall's own finds stay for selectors the
+    // caller did not supply
+    let mut selectors: BTreeMap<String, Entry> =
+        found.into_iter().map(|(selector, entry)| (selector, Entry::Walked(entry))).collect();
+    for (selector, entry_pc) in args.entry_points.iter().flatten() {
+        selectors.insert(selector.clone(), Entry::Supplied(*entry_pc));
+    }
 
     // resolve selectors (if enabled)
     let resolved_selectors = match args.skip_resolving {
@@ -202,7 +220,7 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
 
     // ordered, so functions are analyzed (and share postprocessor state) in the same order in
     // every process
-    let mut symbolic_execution_maps = std::collections::BTreeMap::new();
+    let mut symbolic_execution_maps = BTreeMap::new();
     if selectors.is_empty() {
         warn!("discovered no function selectors in the bytecode.");
         let start_sym_exec_time = Instant::now();
@@ -220,8 +238,7 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
 
     // explore selectors in sorted order, each on a fresh copy of the initial VM: `reset()` keeps
     // storage, so one function's SSTOREs used to steer the next, in hash-map order
-    let mut selectors = selectors.into_iter().collect::<Vec<_>>();
-    selectors.sort();
+    let selectors = selectors.into_iter().collect::<Vec<_>>();
 
     // the entries that are not selectors run first: a dispatcher with selectors used to hide
     // them completely
@@ -250,14 +267,19 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
         }
     }
     let overall_sym_exec_time = Instant::now();
-    for (selector, entry_point) in selectors {
+    for (selector, entry) in selectors {
         let start_sym_exec_time = Instant::now();
         let mut function_evm = evm.clone();
-        let (map, stats) = match function_evm.symbolic_exec_selector_with_budget(
-            &selector,
-            entry_point,
-            args.function_budget(&job_used, job_deadline),
-        ) {
+        let budget = args.function_budget(&job_used, job_deadline);
+        let result = match entry {
+            Entry::Walked(entry_point) => {
+                function_evm.symbolic_exec_selector_with_budget(&selector, entry_point, budget)
+            }
+            Entry::Supplied(entry_pc) => decode_hex(&selector).map_err(Into::into).and_then(
+                |calldata| function_evm.symbolic_exec_from_entry(&calldata, entry_pc, budget),
+            ),
+        };
+        let (map, stats) = match result {
             Ok(map) => map,
             Err(e) => {
                 warn!("failed to symbolically execute '{}': {}", selector, e);
@@ -708,6 +730,44 @@ mod tests {
         assert_eq!(steps("22222222"), 0);
         let last = result.functions.iter().find(|f| f.selector == "22222222").unwrap();
         assert_eq!(last.status, BodyStatus::Partial);
+    }
+
+    #[tokio::test]
+    async fn supplied_entries_reach_selectors_the_dispatcher_walk_misses() {
+        use crate::BodyStatus;
+
+        // 0x00fdd58e (pushed as PUSH3 0xfdd58e) jumps to pc 25: SSTORE(0, 1); 0x22222222 to pc 32
+        let code = "60003560e01c8062fdd58e14601957632222222214602057005b6001600055005b00";
+        let build = |entries: Option<BTreeMap<String, u128>>| {
+            DecompilerArgsBuilder::new()
+                .target(code.to_string())
+                .skip_resolving(true)
+                .include_solidity(true)
+                .hardfork(HardFork::Fusaka)
+                .entry_points(entries)
+                .build()
+                .unwrap()
+        };
+
+        // heimdall's own walk misses the selector with a leading zero byte
+        let walked = decompile(build(None)).await.unwrap();
+        assert!(walked.functions.iter().all(|f| f.selector != "00fdd58e"));
+
+        // with entries, the body starts exactly at the supplied offset; a wrong entry fails alone
+        let entries = BTreeMap::from([
+            ("00fdd58e".to_string(), 25u128),
+            ("22222222".to_string(), 25u128),
+        ]);
+        let result = decompile(build(Some(entries))).await.unwrap();
+        let report = |sel: &str| result.functions.iter().find(|f| f.selector == sel).unwrap();
+        let found = report("00fdd58e");
+        assert_eq!(found.status, BodyStatus::Done);
+        assert_eq!(found.entry_pc, Some(25));
+        assert_eq!(found.executed_pcs.first(), Some(&25));
+        assert_eq!(found.effects.len(), 1);
+        let wrong = report("22222222");
+        assert_eq!(wrong.status, BodyStatus::Failed);
+        assert!(wrong.failure.as_deref().unwrap().contains("entry_not_reached"), "{wrong:?}");
     }
 
     #[tokio::test]
