@@ -35,6 +35,16 @@ mod integration_tests {
             llm_postprocess: false,
             etherscan_api_key: String::from(""),
             hardfork: HardFork::Latest,
+            step_budget: 0,
+            job_step_budget: 0,
+            branch_budget: 0,
+            state_budget_bytes: 0,
+            job_state_budget_bytes: 0,
+            job_timeout: 0,
+            context_loops: false,
+            selector_abi: None,
+            fallback_entries: false,
+            entry_points: None,
         })
         .await
         .expect("failed to decompile");
@@ -74,6 +84,16 @@ mod integration_tests {
             llm_postprocess: false,
             etherscan_api_key: String::from(""),
             hardfork: HardFork::Latest,
+            step_budget: 0,
+            job_step_budget: 0,
+            branch_budget: 0,
+            state_budget_bytes: 0,
+            job_state_budget_bytes: 0,
+            job_timeout: 0,
+            context_loops: false,
+            selector_abi: None,
+            fallback_entries: false,
+            entry_points: None,
         })
         .await
         .expect("failed to decompile");
@@ -106,6 +126,16 @@ mod integration_tests {
             llm_postprocess: false,
             etherscan_api_key: String::from(""),
             hardfork: HardFork::Latest,
+            step_budget: 0,
+            job_step_budget: 0,
+            branch_budget: 0,
+            state_budget_bytes: 0,
+            job_state_budget_bytes: 0,
+            job_timeout: 0,
+            context_loops: false,
+            selector_abi: None,
+            fallback_entries: false,
+            entry_points: None,
         })
         .await
         .expect("failed to decompile");
@@ -138,6 +168,16 @@ mod integration_tests {
             llm_postprocess: false,
             etherscan_api_key: String::from(""),
             hardfork: HardFork::Latest,
+            step_budget: 0,
+            job_step_budget: 0,
+            branch_budget: 0,
+            state_budget_bytes: 0,
+            job_state_budget_bytes: 0,
+            job_timeout: 0,
+            context_loops: false,
+            selector_abi: None,
+            fallback_entries: false,
+            entry_points: None,
         })
         .await
         .expect("failed to decompile");
@@ -170,6 +210,16 @@ mod integration_tests {
             llm_postprocess: false,
             etherscan_api_key: String::from(""),
             hardfork: HardFork::Latest,
+            step_budget: 0,
+            job_step_budget: 0,
+            branch_budget: 0,
+            state_budget_bytes: 0,
+            job_state_budget_bytes: 0,
+            job_timeout: 0,
+            context_loops: false,
+            selector_abi: None,
+            fallback_entries: false,
+            entry_points: None,
         })
         .await
         .expect("failed to decompile");
@@ -219,6 +269,16 @@ mod integration_tests {
             llm_postprocess: false,
             etherscan_api_key: String::from(""),
             hardfork: HardFork::Latest,
+            step_budget: 0,
+            job_step_budget: 0,
+            branch_budget: 0,
+            state_budget_bytes: 0,
+            job_state_budget_bytes: 0,
+            job_timeout: 0,
+            context_loops: false,
+            selector_abi: None,
+            fallback_entries: false,
+            entry_points: None,
         })
         .await
         .expect("failed to decompile");
@@ -254,6 +314,16 @@ mod integration_tests {
             llm_postprocess: false,
             etherscan_api_key: String::from(""),
             hardfork: HardFork::Latest,
+            step_budget: 0,
+            job_step_budget: 0,
+            branch_budget: 0,
+            state_budget_bytes: 0,
+            job_state_budget_bytes: 0,
+            job_timeout: 0,
+            context_loops: false,
+            selector_abi: None,
+            fallback_entries: false,
+            entry_points: None,
         })
         .await
         .expect("failed to decompile");
@@ -295,6 +365,16 @@ mod integration_tests {
             llm_postprocess: false,
             etherscan_api_key: String::from(""),
             hardfork: HardFork::Latest,
+            step_budget: 0,
+            job_step_budget: 0,
+            branch_budget: 0,
+            state_budget_bytes: 0,
+            job_state_budget_bytes: 0,
+            job_timeout: 0,
+            context_loops: false,
+            selector_abi: None,
+            fallback_entries: false,
+            entry_points: None,
         })
         .await
         .expect("failed to decompile");
@@ -327,6 +407,16 @@ mod integration_tests {
             llm_postprocess: false,
             etherscan_api_key: String::from(""),
             hardfork: HardFork::Latest,
+            step_budget: 0,
+            job_step_budget: 0,
+            branch_budget: 0,
+            state_budget_bytes: 0,
+            job_state_budget_bytes: 0,
+            job_timeout: 0,
+            context_loops: false,
+            selector_abi: None,
+            fallback_entries: false,
+            entry_points: None,
         })
         .await
         .expect("failed to decompile");
@@ -360,6 +450,16 @@ mod integration_tests {
             timeout: 10000,
             abi: None,
             hardfork: HardFork::Latest,
+            step_budget: 0,
+            job_step_budget: 0,
+            branch_budget: 0,
+            state_budget_bytes: 0,
+            job_state_budget_bytes: 0,
+            job_timeout: 0,
+            context_loops: false,
+            selector_abi: None,
+            fallback_entries: false,
+            entry_points: None,
         })
         .await
         .expect("failed to decompile");
@@ -393,6 +493,16 @@ mod integration_tests {
             llm_postprocess: false,
             etherscan_api_key: String::from(""),
             hardfork: HardFork::Auto,
+            step_budget: 0,
+            job_step_budget: 0,
+            branch_budget: 0,
+            state_budget_bytes: 0,
+            job_state_budget_bytes: 0,
+            job_timeout: 0,
+            context_loops: false,
+            selector_abi: None,
+            fallback_entries: false,
+            entry_points: None,
         })
         .await
         .expect("failed to decompile with auto hardfork");
@@ -427,6 +537,16 @@ mod integration_tests {
             llm_postprocess: false,
             etherscan_api_key: String::from(""),
             hardfork: HardFork::Auto,
+            step_budget: 0,
+            job_step_budget: 0,
+            branch_budget: 0,
+            state_budget_bytes: 0,
+            job_state_budget_bytes: 0,
+            job_timeout: 0,
+            context_loops: false,
+            selector_abi: None,
+            fallback_entries: false,
+            entry_points: None,
         })
         .await
         .expect("failed to decompile with auto hardfork fallback");
