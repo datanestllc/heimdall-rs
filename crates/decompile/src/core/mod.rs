@@ -47,7 +47,10 @@ use crate::{
             source::{build_source, StorageVariable},
         },
         postprocess::PostprocessOrchestrator,
-        resolve::{apply_selector_abi, apply_selector_abi_returns, match_parameters},
+        resolve::{
+            apply_selector_abi, apply_selector_abi_mutability, apply_selector_abi_returns,
+            match_parameters,
+        },
     },
     error::Error,
     interfaces::{
@@ -502,10 +505,11 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
         })
         .collect::<Vec<_>>();
 
-    // postprocessors may refine the return type; a supplied one stays
+    // postprocessors may refine the return type and mutability; supplied ones stay
     for f in analyzed_functions.iter_mut() {
         if let Some(abi) = args.selector_abi.as_ref().and_then(|abi| abi.get(&f.selector)) {
             apply_selector_abi_returns(f, abi);
+            apply_selector_abi_mutability(f, abi);
         }
     }
 
@@ -717,6 +721,10 @@ mod tests {
         let source = result.source.unwrap();
         assert!(source.contains("fallback() external payable {"), "{source}");
         assert!(source.contains("receive() external payable {"), "{source}");
+        // the dispatcher is not logic of either entry
+        let entries = &source[source.find("fallback() external payable {").unwrap()..];
+        let entries = &entries[..entries.find("function ").unwrap_or(entries.len())];
+        assert!(!entries.contains("msg.data"), "{entries}");
     }
 
     #[tokio::test]
@@ -792,7 +800,7 @@ mod tests {
         let code = "60003560e01c80631111111114601a57632222222214602957005b600060006000600034335af150005b60243560040180359060200181906080376000600082608060006004355af1505000";
         let abi = |inputs: &[&str]| SelectorAbi {
             inputs: inputs.iter().map(|s| s.to_string()).collect(),
-            outputs: None,
+            ..Default::default()
         };
         let args = DecompilerArgsBuilder::new()
             .target(code.to_string())
@@ -831,7 +839,11 @@ mod tests {
         let mut selector_abi = BTreeMap::new();
         selector_abi.insert(
             "a9059cbb".to_string(),
-            SelectorAbi { inputs: vec!["address".into(), "uint256".into()], outputs: None },
+            SelectorAbi {
+                inputs: vec!["address".into(), "uint256".into()],
+                state_mutability: Some("nonpayable".into()),
+                ..Default::default()
+            },
         );
         let args = DecompilerArgsBuilder::new()
             .target(TINY.to_string())
@@ -849,8 +861,9 @@ mod tests {
         assert_eq!(inputs, vec!["address", "uint256"]);
         let source = result.source.unwrap();
         assert!(
-            source.contains("function func_a9059cbb(address arg0, uint256 arg1)"),
+            source.contains("function func_a9059cbb(address arg0, uint256 arg1) public {"),
             "{source}"
         );
+        assert_eq!(function.state_mutability, alloy_json_abi::StateMutability::NonPayable);
     }
 }

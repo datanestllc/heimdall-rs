@@ -1,7 +1,7 @@
 use std::{fmt::Display, time::Instant};
 
 use futures::future::BoxFuture;
-use heimdall_vm::ext::exec::VMTrace;
+use heimdall_vm::ext::exec::{is_decided_by_dispatch, VMTrace};
 use tracing::debug;
 
 use crate::{
@@ -211,6 +211,14 @@ impl Analyzer {
                     let instruction = &state.last_instruction;
                     if instruction.opcode == 0x57 && !branch.children.is_empty() {
                         if branch.children.len() == 1 {
+                            // in `fallback` / `receive`, a JUMPI decided by the selector or the
+                            // calldata size is the dispatcher, not logic of the entry
+                            if self.function.fallback &&
+                                instruction.input_operations.get(1).is_some_and(is_decided_by_dispatch)
+                            {
+                                self.analyze_inner(&branch.children[0], analyzer_state).await?;
+                                return Ok(());
+                            }
                             let condition = instruction
                                 .input_operations
                                 .get(1)

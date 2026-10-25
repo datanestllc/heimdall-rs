@@ -142,7 +142,7 @@ impl ExecStats {
 /// Whether a JUMPI condition reads calldata, and only through `CALLDATASIZE` or the selector
 /// (`calldataload(0)` shifted right by 224 bits, or divided by 2^224), on top of constants and
 /// pure arithmetic. Such a condition is decided by the calldata of a non-selector entry.
-fn is_decided_by_dispatch(condition: &WrappedOpcode) -> bool {
+pub fn is_decided_by_dispatch(condition: &WrappedOpcode) -> bool {
     fn constant(input: &WrappedInput) -> Option<U256> {
         match input {
             WrappedInput::Raw(value) => Some(*value),

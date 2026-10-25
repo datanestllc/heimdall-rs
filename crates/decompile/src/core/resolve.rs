@@ -42,7 +42,22 @@ pub(crate) fn apply_selector_abi(function: &mut AnalyzedFunction, abi: &Selector
     }
 
     apply_selector_abi_returns(function, abi);
+    apply_selector_abi_mutability(function, abi);
     true
+}
+
+/// Set the state mutability from `abi.state_mutability`, when given.
+pub(crate) fn apply_selector_abi_mutability(function: &mut AnalyzedFunction, abi: &SelectorAbi) {
+    let (pure, view, payable) = match abi.state_mutability.as_deref() {
+        Some("pure") => (true, true, false),
+        Some("view") => (false, true, false),
+        Some("nonpayable") => (false, false, false),
+        Some("payable") => (false, false, true),
+        _ => return,
+    };
+    function.pure = pure;
+    function.view = view;
+    function.payable = payable;
 }
 
 /// Set the return type from `abi.outputs`, when given. Several outputs keep the inferred type.
@@ -175,6 +190,7 @@ mod tests {
         SelectorAbi {
             inputs: inputs.iter().map(|s| s.to_string()).collect(),
             outputs: outputs.map(|o| o.iter().map(|s| s.to_string()).collect()),
+            state_mutability: None,
         }
     }
 
@@ -205,6 +221,15 @@ mod tests {
 
         apply_selector_abi_returns(&mut f, &abi(&[], Some(&["string"])));
         assert_eq!(f.returns, Some(SolidityType::String.in_memory()));
+
+        // inference said payable (the default); the supplied mutability wins
+        assert!(f.payable);
+        let nonpayable = SelectorAbi { state_mutability: Some("nonpayable".into()), ..abi(&[], None) };
+        apply_selector_abi_mutability(&mut f, &nonpayable);
+        assert!(!f.pure && !f.view && !f.payable);
+        let view = SelectorAbi { state_mutability: Some("view".into()), ..abi(&[], None) };
+        apply_selector_abi_mutability(&mut f, &view);
+        assert!(!f.pure && f.view && !f.payable);
     }
 
     #[test]

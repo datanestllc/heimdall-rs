@@ -21,6 +21,8 @@ pub struct SelectorAbi {
     pub inputs: Vec<String>,
     /// Solidity types of the outputs, when known. `None` keeps the inferred return type.
     pub outputs: Option<Vec<String>>,
+    /// `pure`, `view`, `nonpayable` or `payable`, when known. `None` keeps the inferred one.
+    pub state_mutability: Option<String>,
 }
 
 #[derive(Debug, Clone, Parser, Builder)]
