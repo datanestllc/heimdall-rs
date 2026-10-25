@@ -47,12 +47,23 @@ pub struct WrappedOpcode {
     /// This prevents repeated O(n) tree traversals, making depth() O(1) after
     /// first access instead of O(2^depth).
     cached_depth: OnceCell<u32>,
+
+    /// Cached [`WrappedOpcode::tree_size`], computed once on first access.
+    cached_size: OnceCell<u64>,
 }
+
+/// Upper bound on the nodes an expression may expand to when it is rendered.
+///
+/// Inputs are shared through [`Arc`], so a [`WrappedOpcode`] is a DAG. Expanding it into a tree
+/// (to render it as text or as an expression) is exponential in its depth: straight-line code such
+/// as `x = addmod(x, x, m)` repeated a thousand times never finishes rendering. Renderers replace a
+/// sub-expression larger than this with a placeholder.
+pub const MAX_EXPANDED_NODES: u64 = 4096;
 
 impl WrappedOpcode {
     /// Creates a new WrappedOpcode with the given opcode and inputs.
     pub fn new(opcode: u8, inputs: Vec<WrappedInput>) -> Self {
-        Self { opcode, inputs, cached_depth: OnceCell::new() }
+        Self { opcode, inputs, cached_depth: OnceCell::new(), cached_size: OnceCell::new() }
     }
 
     /// Returns the maximum recursion depth of its inputs.
@@ -68,6 +79,22 @@ impl WrappedOpcode {
             .cached_depth
             .get_or_init(|| self.inputs.iter().map(|x| x.depth()).max().unwrap_or(0) + 1)
     }
+
+    /// Returns the number of nodes of this expression when expanded as a tree, saturating at
+    /// `u64::MAX`. Shared sub-expressions count once per use.
+    ///
+    /// Memoized like [`WrappedOpcode::depth`], so it is O(number of inputs) once the inputs know
+    /// their own size.
+    pub fn tree_size(&self) -> u64 {
+        *self.cached_size.get_or_init(|| {
+            self.inputs.iter().fold(1u64, |total, input| total.saturating_add(input.tree_size()))
+        })
+    }
+
+    /// Whether this expression expands to more than [`MAX_EXPANDED_NODES`] nodes.
+    pub fn is_too_large_to_expand(&self) -> bool {
+        self.tree_size() > MAX_EXPANDED_NODES
+    }
 }
 
 impl Clone for WrappedOpcode {
@@ -77,6 +104,7 @@ impl Clone for WrappedOpcode {
             inputs: self.inputs.clone(),
             // Don't clone the cached depth - let it be recomputed if needed
             cached_depth: OnceCell::new(),
+            cached_size: OnceCell::new(),
         }
     }
 }
@@ -98,7 +126,12 @@ impl std::hash::Hash for WrappedOpcode {
 
 impl Default for WrappedOpcode {
     fn default() -> Self {
-        Self { opcode: 0, inputs: Vec::new(), cached_depth: OnceCell::new() }
+        Self {
+            opcode: 0,
+            inputs: Vec::new(),
+            cached_depth: OnceCell::new(),
+            cached_size: OnceCell::new(),
+        }
     }
 }
 
@@ -129,6 +162,14 @@ impl WrappedInput {
         match self {
             WrappedInput::Raw(_) => 0,
             WrappedInput::Opcode(opcode) => opcode.depth(),
+        }
+    }
+
+    /// Returns the number of nodes of the input when expanded as a tree (1 for a raw value).
+    pub fn tree_size(&self) -> u64 {
+        match self {
+            WrappedInput::Raw(_) => 1,
+            WrappedInput::Opcode(opcode) => opcode.tree_size(),
         }
     }
 }

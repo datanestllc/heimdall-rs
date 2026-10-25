@@ -38,6 +38,11 @@ pub fn is_ext_call_precompile(precompile_address: U256) -> bool {
 impl WrappedOpcode {
     /// Returns a WrappedOpcode's solidity representation.
     pub fn solidify(&self) -> String {
+        // expanding a huge shared expression never finishes; see `MAX_EXPANDED_NODES`
+        if self.is_too_large_to_expand() {
+            return "expression_too_large".to_string();
+        }
+
         let mut solidified_wrapped_opcode = String::new();
 
         match self.opcode {

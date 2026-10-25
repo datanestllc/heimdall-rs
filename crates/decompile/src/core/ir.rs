@@ -329,6 +329,10 @@ impl Expr {
     fn from_input(input: &WrappedInput) -> Self {
         match input {
             WrappedInput::Raw(value) => Self::Literal(*value),
+            // a shared sub-expression that expands past the limit would never finish
+            WrappedInput::Opcode(opcode) if opcode.is_too_large_to_expand() => {
+                Self::raw("/* expression too large */")
+            }
             WrappedInput::Opcode(opcode) => Self::from_opcode(opcode),
         }
     }
@@ -968,6 +972,28 @@ mod tests {
     use heimdall_vm::core::opcodes::{self, WrappedInput, WrappedOpcode};
 
     use super::{BinaryOp, Expr, RenderTarget, Statement};
+
+    #[test]
+    fn shared_subexpressions_do_not_expand_exponentially() {
+        // x = addmod(x, x, 7) two hundred times: a DAG of ~200 nodes, a tree of 2^200
+        let mut x = WrappedOpcode::new(opcodes::CALLDATALOAD, vec![U256::from(4).into()]);
+        for _ in 0..200 {
+            let shared = Arc::new(x);
+            x = WrappedOpcode::new(
+                opcodes::ADDMOD,
+                vec![
+                    WrappedInput::Opcode(shared.clone()),
+                    WrappedInput::Opcode(shared),
+                    U256::from(7).into(),
+                ],
+            );
+        }
+        assert_eq!(x.tree_size(), u64::MAX);
+        assert_eq!(x.solidify(), "expression_too_large");
+        let rendered = Expr::from_opcode(&x).render();
+        assert!(rendered.contains("/* expression too large */"), "{rendered}");
+        assert!(rendered.len() < 200, "{rendered}");
+    }
 
     #[test]
     fn renders_structured_assignment() {
