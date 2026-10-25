@@ -279,11 +279,16 @@ impl PostprocessOrchestrator {
             ..Default::default()
         };
 
-        // add the function arguments to memory_type_map
+        // add the function arguments to memory_type_map; the types of the chosen signature win
+        // over the inferred ones, so the casts in the body agree with the header
+        let declared = function.resolved_function.as_ref().map(|resolved| resolved.inputs.clone());
         state.memory_type_map.extend(function.arguments.iter().map(|(i, frame)| {
+            let declared = declared.as_ref().and_then(|inputs| inputs.get(*i));
             (
                 format!("arg{i}"),
-                frame.potential_types().first().cloned().unwrap_or(SolidityType::FixedBytes(32)),
+                declared.map(|ty| SolidityType::parse(ty)).unwrap_or_else(|| {
+                    frame.potential_types().first().cloned().unwrap_or(SolidityType::FixedBytes(32))
+                }),
             )
         }));
 

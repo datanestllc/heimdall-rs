@@ -5,7 +5,20 @@ use eyre::Result;
 use heimdall_common::ether::bytecode::get_bytecode_from_target;
 use heimdall_config::parse_url_arg;
 use heimdall_vm::{core::hardfork::HardFork, ext::exec::ExecBudget};
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
+
+/// Argument and return types for one selector, from a source the caller trusts more than the
+/// decompiler's own inference: an interface extractor such as evmole, or a verified ABI.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SelectorAbi {
+    /// Solidity types of the inputs, in order, e.g. `["address", "(uint256,bytes)[]"]`.
+    pub inputs: Vec<String>,
+    /// Solidity types of the outputs, when known. `None` keeps the inferred return type.
+    pub outputs: Option<Vec<String>>,
+}
 
 #[derive(Debug, Clone, Parser, Builder)]
 #[clap(
@@ -108,6 +121,14 @@ pub struct DecompilerArgs {
     /// Path to an optional ABI file to use for resolving errors, functions, and events.
     #[clap(long, short, default_value = None, hide_default_value = true)]
     pub abi: Option<String>,
+
+    /// Argument and return types per selector (8 lowercase hex characters, no `0x`), for library
+    /// callers. For these selectors the given types are used as they are: signature matching is
+    /// skipped, the header and the body are typed from them, and the function is named
+    /// `func_<selector>`. Nothing is written to the signature cache.
+    #[clap(skip)]
+    #[builder(default)]
+    pub selector_abi: Option<BTreeMap<String, SelectorAbi>>,
 
     /// Whether to post-process the output using a LLM.
     #[clap(long, short)]
@@ -241,6 +262,7 @@ impl DecompilerArgsBuilder {
             state_budget_bytes: Some(0),
             job_timeout: Some(0),
             abi: Some(None),
+            selector_abi: Some(None),
             llm_postprocess: Some(false),
             openrouter_api_key: Some(String::new()),
             model: Some(String::new()),

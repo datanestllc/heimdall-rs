@@ -38,7 +38,7 @@ use crate::{
             source::{build_source, StorageVariable},
         },
         postprocess::PostprocessOrchestrator,
-        resolve::match_parameters,
+        resolve::{apply_selector_abi, apply_selector_abi_returns, match_parameters},
     },
     error::Error,
     interfaces::{sort_analyzed_functions, AnalyzedFunction, DecompilerArgs, FunctionReport},
@@ -334,6 +334,13 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
 
     // match analyzed parameters with resolved signatures for each function
     analyzed_functions.iter_mut().for_each(|f| {
+        // caller-supplied types are taken as they are
+        if let Some(abi) = args.selector_abi.as_ref().and_then(|abi| abi.get(&f.selector)) {
+            if apply_selector_abi(f, abi) {
+                return;
+            }
+        }
+
         let resolve_function_signatures =
             resolved_selectors.get(&f.selector).unwrap_or(&Vec::new()).to_owned();
         let mut matched_resolved_functions = match_parameters(resolve_function_signatures, f);
@@ -370,6 +377,13 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
             postprocessor.postprocess(f).map_err(|e| f.notices.push(e.to_string())).ok()
         })
         .collect::<Vec<_>>();
+
+    // postprocessors may refine the return type; a supplied one stays
+    for f in analyzed_functions.iter_mut() {
+        if let Some(abi) = args.selector_abi.as_ref().and_then(|abi| abi.get(&f.selector)) {
+            apply_selector_abi_returns(f, abi);
+        }
+    }
 
     let storage_slots = states
         .iter()
@@ -419,4 +433,47 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
     });
 
     Ok(DecompileResult { source, abi, abi_with_details, functions })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use crate::{DecompilerArgsBuilder, HardFork, SelectorAbi};
+
+    use super::decompile;
+
+    /// `transfer`-like dispatcher: selector 0xa9059cbb jumps to pc 0x10, which stores
+    /// calldataload(4) in slot 0 and stops.
+    /// 0: PUSH1 0 CALLDATALOAD PUSH1 0xe0 SHR PUSH4 a9059cbb EQ PUSH1 0x10 JUMPI STOP
+    /// 16: JUMPDEST PUSH1 4 CALLDATALOAD PUSH1 0 SSTORE STOP
+    pub(crate) const TINY: &str = "60003560e01c63a9059cbb14601057005b60043560005500";
+
+    #[tokio::test]
+    async fn supplied_abi_types_the_header_and_skips_signature_matching() {
+        let mut selector_abi = BTreeMap::new();
+        selector_abi.insert(
+            "a9059cbb".to_string(),
+            SelectorAbi { inputs: vec!["address".into(), "uint256".into()], outputs: None },
+        );
+        let args = DecompilerArgsBuilder::new()
+            .target(TINY.to_string())
+            .skip_resolving(true)
+            .include_solidity(true)
+            .hardfork(HardFork::Fusaka)
+            .selector_abi(Some(selector_abi))
+            .build()
+            .unwrap();
+        let result = decompile(args).await.unwrap();
+
+        // inference alone sees one argument; the supplied ABI has two
+        let function = &result.abi.functions["func_a9059cbb"][0];
+        let inputs = function.inputs.iter().map(|p| p.ty.as_str()).collect::<Vec<_>>();
+        assert_eq!(inputs, vec!["address", "uint256"]);
+        let source = result.source.unwrap();
+        assert!(
+            source.contains("function func_a9059cbb(address arg0, uint256 arg1)"),
+            "{source}"
+        );
+    }
 }
