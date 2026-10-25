@@ -447,11 +447,12 @@ impl VM {
             if self.bytecode.len() < self.instruction as usize {
                 eyre::bail!("entry_not_reached: execution left the code before pc {entry_pc:#x}");
             }
-            let pc = self.instruction.saturating_sub(1);
             if let Some(reason) = ctx.exhausted() {
-                let root = VMTrace { instruction: self.instruction, ..Default::default() };
-                return Ok((ctx.truncate(root, reason, pc), ctx.stats));
+                // nothing of the body was explored; it starts at the entry all the same
+                let root = VMTrace { instruction: entry_instruction, ..Default::default() };
+                return Ok((ctx.truncate(root, reason, entry_pc), ctx.stats));
             }
+            let pc = self.instruction.saturating_sub(1);
             steps += 1;
             ctx.stats.steps += 1;
             if let Err(e) = self.step() {
@@ -890,6 +891,23 @@ mod tests {
         let budget = ExecBudget { context_loops: true, ..ExecBudget::unlimited() };
         let (_, stats) = vm("5b600160005560003560005700").symbolic_exec_with_budget(budget).unwrap();
         assert_eq!(stats.loop_heuristics.get("explored_context"), Some(&1));
+    }
+
+    #[test]
+    fn an_entry_out_of_budget_still_starts_at_the_entry() {
+        // the dispatcher of `entry_exploration_follows_dispatch_but_forks_on_arguments`
+        let code = "3615601b5760003560e01c631111111114601d57600435601f57005b005b005b00";
+        let budget = ExecBudget { max_steps: 0, ..ExecBudget::unlimited() };
+        let (trace, _) = vm(code).symbolic_exec_from_entry(&[0x11; 4], 29, budget).unwrap();
+        assert_eq!(trace.instruction, 30);
+        assert_eq!(trace.truncated, Some(Truncation { reason: TruncationReason::StepBudget, pc: 29 }));
+
+        let (trace, _) =
+            vm(code).symbolic_exec_from_entry(&[0x11; 4], 29, ExecBudget::unlimited()).unwrap();
+        assert_eq!(trace.operations[0].last_instruction.instruction, 30);
+        // an entry the dispatcher never jumps to for this calldata
+        let wrong = vm(code).symbolic_exec_from_entry(&[0x22; 4], 29, ExecBudget::unlimited());
+        assert!(wrong.unwrap_err().to_string().contains("entry_not_reached"));
     }
 
     #[test]
