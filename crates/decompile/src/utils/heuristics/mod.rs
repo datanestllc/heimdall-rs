@@ -5,6 +5,7 @@ use crate::{core::analyze::AnalyzerState, interfaces::AnalyzedFunction, Error};
 
 // import heuristics
 mod arguments;
+mod effects;
 mod events;
 mod extcall;
 mod modifiers;
@@ -13,6 +14,7 @@ mod yul;
 
 // re-export heuristics
 pub(crate) use arguments::argument_heuristic;
+pub(crate) use effects::{effects_heuristic, EffectScratch};
 pub(crate) use events::event_heuristic;
 pub(crate) use extcall::extcall_heuristic;
 pub(crate) use modifiers::modifier_heuristic;

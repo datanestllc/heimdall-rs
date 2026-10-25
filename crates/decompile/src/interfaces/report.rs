@@ -1,5 +1,7 @@
 use heimdall_vm::ext::exec::{ExecStats, TruncationReason, VMTrace};
 
+use crate::interfaces::Effect;
+
 /// How far the body of one function was analyzed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BodyStatus {
@@ -45,6 +47,11 @@ pub struct FunctionReport {
     pub failure: Option<String>,
     /// Steps, branches, saved state bytes and dropped paths by reason.
     pub stats: ExecStats,
+    /// Effectful opcodes of the analyzed paths, sorted by PC; kept when the analysis fails part
+    /// way.
+    pub effects: Vec<Effect>,
+    /// 0-based PCs of every analyzed instruction, sorted.
+    pub executed_pcs: Vec<u128>,
 }
 
 impl FunctionReport {
@@ -56,6 +63,8 @@ impl FunctionReport {
             status: BodyStatus::from_stats(&stats),
             failure: None,
             stats,
+            effects: Vec::new(),
+            executed_pcs: Vec::new(),
         }
     }
 
@@ -67,6 +76,8 @@ impl FunctionReport {
             status: BodyStatus::Failed,
             failure: Some(failure),
             stats: ExecStats::default(),
+            effects: Vec::new(),
+            executed_pcs: Vec::new(),
         }
     }
 }

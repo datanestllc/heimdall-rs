@@ -28,7 +28,11 @@ use heimdall_vm::{
     core::vm::VM,
     ext::selectors::{find_function_selectors, resolve_selectors},
 };
-use std::time::{Duration, Instant};
+use futures::FutureExt;
+use std::{
+    panic::AssertUnwindSafe,
+    time::{Duration, Instant},
+};
 
 use crate::{
     core::{
@@ -41,9 +45,23 @@ use crate::{
         resolve::{apply_selector_abi, apply_selector_abi_returns, match_parameters},
     },
     error::Error,
-    interfaces::{sort_analyzed_functions, AnalyzedFunction, DecompilerArgs, FunctionReport},
+    interfaces::{
+        sort_analyzed_functions, AnalyzedFunction, BodyStatus, DecompilerArgs, FunctionReport,
+    },
 };
 use tracing::{debug, info, warn};
+
+/// Upper bound on VM steps when a constant function is executed for its value.
+const MAX_CONSTANT_CALL_STEPS: u64 = 100_000;
+
+/// The message of a caught panic.
+fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
+}
 
 #[derive(Debug, Clone)]
 /// Result of a successful decompile operation
@@ -225,20 +243,30 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
     let start_analysis_time = Instant::now();
     let handles = symbolic_execution_maps.into_iter().map(|(selector, trace_root)| {
         let mut evm_clone = evm.clone();
-        async move {
-            let mut analyzer = Analyzer::new(
-                analyzer_type,
-                args.skip_resolving,
-                AnalyzedFunction::new(&selector, selector == "fallback"),
-            );
-
-            // analyze the symbolic execution trace
-            let mut analyzed_function = analyzer.analyze(trace_root).await?;
+        let mut analyzer = Analyzer::new(
+            analyzer_type,
+            args.skip_resolving,
+            AnalyzedFunction::new(&selector, selector == "fallback"),
+        );
+        let key = selector.clone();
+        let analysis = async move {
+            // analyze the symbolic execution trace; keep what was found even if it fails
+            let (mut analyzed_function, error) = analyzer.analyze_partial(trace_root).await;
+            if error.is_some() {
+                return (analyzed_function, error);
+            }
 
             // if the function is constant, we can get the exact val
             if analyzed_function.is_constant() && !analyzed_function.fallback {
                 evm_clone.reset();
-                let x = evm_clone.call(&decode_hex(&selector).expect("invalid selector"), 0)?;
+                let x = match evm_clone.call_bounded(
+                    &decode_hex(&selector).expect("invalid selector"),
+                    0,
+                    MAX_CONSTANT_CALL_STEPS,
+                ) {
+                    Ok(x) => x,
+                    Err(e) => return (analyzed_function, Some(Error::Eyre(e))),
+                };
 
                 let returns_param_type = analyzed_function
                     .returns
@@ -259,10 +287,35 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
                 analyzed_function.constant_value = Some(decoded);
             }
 
-            Ok::<_, Error>(analyzed_function)
-        }
+            (analyzed_function, None)
+        };
+        // a failure or a panic in one function marks only that function
+        AssertUnwindSafe(analysis).catch_unwind().map(move |outcome| (key, outcome))
     });
-    let mut analyzed_functions = futures::future::try_join_all(handles).await?;
+    let mut analyzed_functions = Vec::new();
+    for (selector, outcome) in futures::future::join_all(handles).await {
+        let failure = match outcome {
+            Ok((function, error)) => {
+                if let Some(report) = reports.get_mut(&selector) {
+                    report.effects = function.effects.iter().cloned().collect();
+                    report.executed_pcs = function.executed_pcs.iter().copied().collect();
+                }
+                match error {
+                    None => {
+                        analyzed_functions.push(function);
+                        None
+                    }
+                    Some(error) => Some(format!("analysis failed: {error}")),
+                }
+            }
+            Err(panic) => Some(format!("analysis panicked: {}", panic_message(&panic))),
+        };
+        if let (Some(failure), Some(report)) = (failure, reports.get_mut(&selector)) {
+            warn!("'{}': {}", selector, failure);
+            report.status = BodyStatus::Failed;
+            report.failure = Some(failure);
+        }
+    }
 
     debug!("analyzing symbolic execution results took {:?}", start_analysis_time.elapsed());
     info!("analyzed {} symbolic execution traces", analyzed_functions.len());
@@ -448,6 +501,100 @@ mod tests {
     /// 0: PUSH1 0 CALLDATALOAD PUSH1 0xe0 SHR PUSH4 a9059cbb EQ PUSH1 0x10 JUMPI STOP
     /// 16: JUMPDEST PUSH1 4 CALLDATALOAD PUSH1 0 SSTORE STOP
     pub(crate) const TINY: &str = "60003560e01c63a9059cbb14601057005b60043560005500";
+
+    /// Dispatcher for 0xa9059cbb (body at pc 0x11) whose body has one effect of each kind:
+    /// pc 23  SSTORE slot 0 <- calldataload(4)
+    /// pc 41  SSTORE balances[msg.sender] (mapping at slot 1) <- 5, via SHA3 at pc 37
+    /// pc 79  LOG1 Transfer topic0
+    /// pc 148 CALL 0x..c0ffee01 balanceOf(..): selector written by a constant MSTORE, value 0
+    /// pc 172 CALL calldataload(4) with msg.value: selector copied from calldata at pc 157
+    /// pc 223 REVERT CustomError 0x12345678, on the branch where calldataload(0x24) != 0
+    const EFFECTS: &str = "60003560e01c63a9059cbb1461001157005b6004356000553360005260016020526040600020600590557fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef60006000a17f70a0823100000000000000000000000000000000000000000000000000000000608052602060006024608060007300000000000000000000000000000000c0ffee015af1506024600461010037600060006024610100346004355af1506024356100b657005b7f123456780000000000000000000000000000000000000000000000000000000060005260046000fd";
+
+    #[tokio::test]
+    async fn effects_are_recorded_at_opcode_time() {
+        use crate::{BodyStatus, Effect, EffectOperand as Op, RevertReason};
+        use alloy::primitives::U256;
+        use heimdall_vm::core::opcodes;
+
+        let args = DecompilerArgsBuilder::new()
+            .target(EFFECTS.to_string())
+            .skip_resolving(true)
+            .include_solidity(true)
+            .hardfork(HardFork::Fusaka)
+            .build()
+            .unwrap();
+        let result = decompile(args).await.unwrap();
+        let report = result.functions.iter().find(|f| f.selector == "a9059cbb").unwrap();
+        assert_eq!(report.status, BodyStatus::Done);
+        assert_eq!(report.entry_pc, Some(0x11));
+        assert_eq!(report.executed_pcs.first(), Some(&0x11), "dispatcher PCs are not included");
+        assert!(report.executed_pcs.contains(&223));
+
+        let none = |pc: u128, opcode: u8| Effect {
+            pc,
+            opcode,
+            target: None,
+            selector: None,
+            value: None,
+            slot: None,
+            topic0: None,
+            revert: None,
+        };
+        let topic0 = U256::from_str_radix(
+            "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            16,
+        )
+        .unwrap();
+        let expected = vec![
+            Effect { slot: Some(Op::Const(U256::ZERO)), ..none(23, opcodes::SSTORE) },
+            Effect { slot: Some(Op::Mapping(U256::from(1))), ..none(41, opcodes::SSTORE) },
+            Effect { topic0: Some(topic0), ..none(79, opcodes::LOG1) },
+            Effect {
+                target: Some(Op::Const(U256::from(0xc0ffee01u64))),
+                selector: Some(Op::Const(U256::from(0x70a08231u64))),
+                value: Some(Op::Const(U256::ZERO)),
+                ..none(148, opcodes::CALL)
+            },
+            Effect {
+                target: Some(Op::Arg(0)),
+                selector: Some(Op::Dynamic),
+                value: Some(Op::Dynamic),
+                ..none(172, opcodes::CALL)
+            },
+            Effect {
+                revert: Some(RevertReason::Custom([0x12, 0x34, 0x56, 0x78])),
+                ..none(223, opcodes::REVERT)
+            },
+        ];
+        assert_eq!(report.effects, expected);
+    }
+
+    #[tokio::test]
+    async fn a_failing_function_does_not_fail_the_contract() {
+        use crate::BodyStatus;
+
+        // 0x11111111 jumps to pc 28, an endless `JUMPDEST PUSH2 28 JUMP`: a "constant" function
+        // whose concrete execution never ends. 0x22222222 jumps to pc 33: `JUMPDEST STOP`.
+        let code = "60003560e01c8063111111111461001c5763222222221461002157005b61001c565b00";
+        let args = DecompilerArgsBuilder::new()
+            .target(code.to_string())
+            .skip_resolving(true)
+            .include_solidity(true)
+            .hardfork(HardFork::Fusaka)
+            .step_budget(1000)
+            .build()
+            .unwrap();
+        let result = decompile(args).await.unwrap();
+        let status = |sel: &str| result.functions.iter().find(|f| f.selector == sel).unwrap();
+        let looping = status("11111111");
+        assert_eq!(looping.status, BodyStatus::Failed);
+        assert!(looping.failure.as_deref().unwrap().contains("did not finish"), "{looping:?}");
+        assert_eq!(looping.executed_pcs, vec![28, 29, 32], "kept although the function failed");
+        assert_eq!(status("22222222").status, BodyStatus::Done);
+        let source = result.source.unwrap();
+        assert!(source.contains("22222222") && !source.contains("11111111"), "{source}");
+    }
 
     #[tokio::test]
     async fn supplied_abi_types_the_header_and_skips_signature_matching() {

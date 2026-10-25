@@ -717,6 +717,41 @@ impl VM {
 
         self.execute()
     }
+
+    /// Like [`VM::call`], but fails after `max_steps` instructions instead of running forever on
+    /// a loop.
+    pub fn call_bounded(
+        &mut self,
+        calldata: &[u8],
+        value: u128,
+        max_steps: u64,
+    ) -> Result<ExecutionResult> {
+        self.reset();
+        calldata.clone_into(&mut self.calldata);
+        self.value = value;
+
+        let mut steps = 0u64;
+        while self.bytecode.len() >= self.instruction as usize {
+            if steps >= max_steps {
+                eyre::bail!("execution did not finish within {max_steps} steps");
+            }
+            steps += 1;
+            self.step()?;
+
+            if self.exitcode != 255 || !self.returndata.is_empty() {
+                break;
+            }
+        }
+
+        Ok(ExecutionResult {
+            gas_used: self.gas_used,
+            gas_remaining: self.gas_remaining,
+            returndata: self.returndata.to_owned(),
+            exitcode: self.exitcode,
+            events: self.events.clone(),
+            instruction: self.instruction,
+        })
+    }
 }
 
 #[cfg(test)]

@@ -6,10 +6,14 @@ use alloy::primitives::U256;
 use heimdall_common::ether::signatures::ResolvedFunction;
 use heimdall_vm::core::{opcodes::WrappedOpcode, types::byte_size_to_type};
 
-use crate::core::{
-    analyze::AnalyzerType,
-    ir::{RenderTarget, Statement},
-    types::SolidityType,
+use crate::{
+    core::{
+        analyze::AnalyzerType,
+        ir::{RenderTarget, Statement},
+        types::SolidityType,
+    },
+    interfaces::Effect,
+    utils::heuristics::EffectScratch,
 };
 
 /// The [`AnalyzedFunction`] struct represents a function that has been analyzed by the decompiler.
@@ -65,6 +69,15 @@ pub(crate) struct AnalyzedFunction {
 
     /// optional constant value for this function
     pub constant_value: Option<String>,
+
+    /// effectful opcodes, recorded at opcode time from the state of their path
+    pub effects: BTreeSet<Effect>,
+
+    /// 0-based program counters of every analyzed instruction
+    pub executed_pcs: BTreeSet<u128>,
+
+    /// scratch state of the effects heuristic (memory provenance of the current path)
+    pub effect_scratch: EffectScratch,
 }
 
 #[derive(Clone, Debug)]
@@ -115,6 +128,9 @@ impl AnalyzedFunction {
             fallback,
             maybe_getter_for: None,
             constant_value: None,
+            effects: BTreeSet::new(),
+            executed_pcs: BTreeSet::new(),
+            effect_scratch: EffectScratch::default(),
         }
     }
 

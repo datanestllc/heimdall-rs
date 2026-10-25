@@ -11,8 +11,8 @@ use crate::{
     },
     interfaces::AnalyzedFunction,
     utils::heuristics::{
-        argument_heuristic, event_heuristic, extcall_heuristic, modifier_heuristic,
-        solidity_heuristic, yul_heuristic, Heuristic,
+        argument_heuristic, effects_heuristic, event_heuristic, extcall_heuristic,
+        modifier_heuristic, solidity_heuristic, yul_heuristic, Heuristic,
     },
     Error,
 };
@@ -88,6 +88,8 @@ impl Analyzer {
 
     /// Register heuristics for the given function and trace
     pub(crate) fn register_heuristics(&mut self) -> Result<(), Error> {
+        // first, so an effect is recorded even if a later heuristic fails on the same opcode
+        self.heuristics.push(Heuristic::new(effects_heuristic));
         match self.typ {
             AnalyzerType::Solidity => {
                 self.heuristics.push(Heuristic::new(event_heuristic));
@@ -112,11 +114,17 @@ impl Analyzer {
         Ok(())
     }
 
-    /// Performs analysis
-    pub(crate) async fn analyze(
+    /// Performs analysis, returning what was analyzed (effects, executed PCs) even when it fails
+    /// part way, together with the error.
+    pub(crate) async fn analyze_partial(
         &mut self,
-        mut trace_root: VMTrace,
-    ) -> Result<AnalyzedFunction, Error> {
+        trace_root: VMTrace,
+    ) -> (AnalyzedFunction, Option<Error>) {
+        let error = self.analyze_trace(trace_root).await.err();
+        (self.function.clone(), error)
+    }
+
+    async fn analyze_trace(&mut self, mut trace_root: VMTrace) -> Result<(), Error> {
         debug!(
             "analzying symbolic execution trace for '{}' with the {} analyzer",
             self.function.selector, self.typ
@@ -153,11 +161,26 @@ impl Analyzer {
             start_analysis_time.elapsed()
         );
 
-        Ok(self.function.clone())
+        Ok(())
+    }
+
+    /// Analyze one branch and its children; path-scoped scratch state (the memory provenance of
+    /// the effects heuristic) is restored when the branch is left.
+    fn analyze_inner<'a>(
+        &'a mut self,
+        branch: &'a VMTrace,
+        analyzer_state: &'a mut AnalyzerState,
+    ) -> BoxFuture<'a, Result<(), Error>> {
+        Box::pin(async move {
+            let mark = self.function.effect_scratch.mark();
+            let result = self.analyze_branch(branch, analyzer_state).await;
+            self.function.effect_scratch.restore(mark);
+            result
+        })
     }
 
     /// Inner analysis implementation
-    fn analyze_inner<'a>(
+    fn analyze_branch<'a>(
         &'a mut self,
         branch: &'a VMTrace,
         analyzer_state: &'a mut AnalyzerState,
@@ -367,7 +390,8 @@ mod tests {
 
         let mut analyzer =
             Analyzer::new(AnalyzerType::Solidity, true, AnalyzedFunction::new("deadbeef", false));
-        let function = analyzer.analyze(root).await.unwrap();
+        let (function, error) = analyzer.analyze_partial(root).await;
+        assert!(error.is_none());
         let rendered = function
             .statements
             .iter()
