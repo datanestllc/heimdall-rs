@@ -4,7 +4,8 @@ use derive_builder::Builder;
 use eyre::Result;
 use heimdall_common::ether::bytecode::get_bytecode_from_target;
 use heimdall_config::parse_url_arg;
-use heimdall_vm::core::hardfork::HardFork;
+use heimdall_vm::{core::hardfork::HardFork, ext::exec::ExecBudget};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Parser, Builder)]
 #[clap(
@@ -75,6 +76,35 @@ pub struct DecompilerArgs {
     #[clap(long, short, default_value = "10000", hide_default_value = true)]
     pub timeout: u64,
 
+    /// Deterministic budget: VM steps per function, across all of its paths (0 = unlimited).
+    /// A path that runs out is kept with a `path not explored` marker.
+    #[clap(long, default_value = "0", hide_default_value = true)]
+    #[builder(default)]
+    pub step_budget: u64,
+
+    /// Deterministic budget: VM steps for all functions together (0 = unlimited). Functions are
+    /// explored in selector order, so the split is deterministic.
+    #[clap(long, default_value = "0", hide_default_value = true)]
+    #[builder(default)]
+    pub job_step_budget: u64,
+
+    /// Deterministic budget: JUMPI forks per function (0 = unlimited). Past it, only the side
+    /// the VM takes is followed.
+    #[clap(long, default_value = "0", hide_default_value = true)]
+    #[builder(default)]
+    pub branch_budget: u32,
+
+    /// Deterministic budget: approximate bytes of saved VM states per function (0 = unlimited).
+    #[clap(long, default_value = "0", hide_default_value = true)]
+    #[builder(default)]
+    pub state_budget_bytes: u64,
+
+    /// Wall-clock emergency stop for the whole decompilation in milliseconds (0 = none). Unlike
+    /// the budgets above, it depends on machine load.
+    #[clap(long, default_value = "0", hide_default_value = true)]
+    #[builder(default)]
+    pub job_timeout: u64,
+
     /// Path to an optional ABI file to use for resolving errors, functions, and events.
     #[clap(long, short, default_value = None, hide_default_value = true)]
     pub abi: Option<String>,
@@ -103,6 +133,28 @@ pub struct DecompilerArgs {
 }
 
 impl DecompilerArgs {
+    /// The symbolic execution budget for one function, given the steps the job has used so far
+    /// and the job's wall-clock deadline.
+    pub(crate) fn function_budget(
+        &self,
+        job_steps_used: u64,
+        job_deadline: Option<Instant>,
+    ) -> ExecBudget {
+        let unlimited = |n: u64| if n == 0 { u64::MAX } else { n };
+        let job_left = unlimited(self.job_step_budget).saturating_sub(job_steps_used);
+        let function_deadline = Instant::now().checked_add(Duration::from_millis(self.timeout));
+        let deadline = match (function_deadline, job_deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        ExecBudget {
+            max_steps: unlimited(self.step_budget).min(job_left),
+            max_branches: if self.branch_budget == 0 { u32::MAX } else { self.branch_budget },
+            max_state_bytes: unlimited(self.state_budget_bytes),
+            deadline,
+        }
+    }
+
     /// Retrieves the bytecode for the specified target
     ///
     /// This method fetches the bytecode from a file, address, or directly from a hex string,
@@ -183,6 +235,11 @@ impl DecompilerArgsBuilder {
             output: Some(String::new()),
             name: Some(String::new()),
             timeout: Some(10000),
+            step_budget: Some(0),
+            job_step_budget: Some(0),
+            branch_budget: Some(0),
+            state_budget_bytes: Some(0),
+            job_timeout: Some(0),
             abi: Some(None),
             llm_postprocess: Some(false),
             openrouter_api_key: Some(String::new()),

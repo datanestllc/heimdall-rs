@@ -26,6 +26,9 @@ pub(crate) fn constant_truthiness(expr: Expr) -> Option<bool> {
 /// Symbolic execution deduplicates revisited jumps across sibling paths, so a subtree cut short at
 /// a JUMPI may rely on a sibling for the rest of its body. Such a subtree is not self-contained.
 fn is_complete(trace: &VMTrace) -> bool {
+    if trace.truncated.is_some() {
+        return false;
+    }
     match trace.operations.last().map(|state| state.last_instruction.opcode) {
         Some(JUMPI) => trace.children.len() == 2 && trace.children.iter().all(is_complete),
         Some(opcode) => trace.children.is_empty() && OpCodeInfo::from(opcode).terminating(),
@@ -167,6 +170,7 @@ mod tests {
             gas_used: 0,
             operations: vec![state(instruction, opcode, vec![])],
             children: vec![],
+            truncated: None,
         }
     }
 
@@ -180,6 +184,7 @@ mod tests {
                 vec![WrappedOpcode::new(opcodes::PUSH1, vec![U256::from(20).into()]), condition],
             )],
             children: vec![leaf(11, opcodes::STOP), taken],
+            truncated: None,
         }
     }
 
@@ -192,6 +197,7 @@ mod tests {
             gas_used: 0,
             operations: vec![state(1, opcodes::JUMPI, vec![])],
             children: vec![bare_revert.clone(), bare_revert],
+            truncated: None,
         };
         assert!(is_bare_reverting(&nested_reverts));
 

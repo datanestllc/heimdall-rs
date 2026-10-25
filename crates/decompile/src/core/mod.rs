@@ -41,7 +41,7 @@ use crate::{
         resolve::match_parameters,
     },
     error::Error,
-    interfaces::{sort_analyzed_functions, AnalyzedFunction, DecompilerArgs},
+    interfaces::{sort_analyzed_functions, AnalyzedFunction, DecompilerArgs, FunctionReport},
 };
 use tracing::{debug, info, warn};
 
@@ -57,6 +57,8 @@ pub struct DecompileResult {
     pub abi: JsonAbi,
     /// The extended ABI with selector and signature information
     pub abi_with_details: serde_json::Value,
+    /// One report per function found, ordered by selector (`fallback` last)
+    pub functions: Vec<FunctionReport>,
 }
 
 /// Decompiles EVM bytecode into higher-level Solidity-like code
@@ -169,43 +171,53 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
 
     info!("performing symbolic execution on '{}'", args.target.truncate(64));
 
+    // budgets are counted in VM steps, branches and saved state bytes; wall clock is only an
+    // emergency stop for the whole job
+    let job_deadline = (args.job_timeout > 0)
+        .then(|| start_time.checked_add(Duration::from_millis(args.job_timeout)))
+        .flatten();
+    let mut job_steps_used = 0u64;
+    let mut reports: HashMap<String, FunctionReport> = HashMap::new();
+
     let mut symbolic_execution_maps = HashMap::new();
     if selectors.is_empty() {
         warn!("discovered no function selectors in the bytecode.");
         let start_sym_exec_time = Instant::now();
-        let (map, jumpdest_count) = evm
-            .symbolic_exec(
-                Instant::now()
-                    .checked_add(Duration::from_millis(args.timeout))
-                    .expect("invalid timeout"),
-            )
+        let (map, stats) = evm
+            .symbolic_exec_with_budget(args.function_budget(job_steps_used, job_deadline))
             .map_err(|e| Error::Eyre(eyre!("symbolic execution failed: {}", e)))?;
+        job_steps_used += stats.steps;
 
-        symbolic_execution_maps.insert("fallback".to_string(), map);
         debug!("symbolic execution (fallback) took {:?}", start_sym_exec_time.elapsed());
-        debug!("'fallback' has {} unique branches", jumpdest_count);
+        debug!("'fallback' has {} unique branches", stats.branches);
+        reports.insert("fallback".to_string(), FunctionReport::explored("fallback", &map, stats));
+        symbolic_execution_maps.insert("fallback".to_string(), map);
     }
 
     let overall_sym_exec_time = Instant::now();
     for (selector, entry_point) in selectors {
         let start_sym_exec_time = Instant::now();
         evm.reset();
-        let (map, jumpdest_count) = match evm.symbolic_exec_selector(
+        let (map, stats) = match evm.symbolic_exec_selector_with_budget(
             &selector,
             entry_point,
-            Instant::now()
-                .checked_add(Duration::from_millis(args.timeout))
-                .expect("invalid timeout"),
+            args.function_budget(job_steps_used, job_deadline),
         ) {
             Ok(map) => map,
             Err(e) => {
                 warn!("failed to symbolically execute '{}': {}", selector, e);
+                reports.insert(
+                    selector.clone(),
+                    FunctionReport::failed(&selector, format!("symbolic execution failed: {e}")),
+                );
                 continue;
             }
         };
-        symbolic_execution_maps.insert(selector.clone(), map);
+        job_steps_used += stats.steps;
         debug!("symbolically executed '{}' in {:?}", selector, start_sym_exec_time.elapsed());
-        debug!("'{}' has {} unique branches", selector, jumpdest_count);
+        debug!("'{}' has {} unique branches", selector, stats.branches);
+        reports.insert(selector.clone(), FunctionReport::explored(&selector, &map, stats));
+        symbolic_execution_maps.insert(selector.clone(), map);
     }
     debug!("symbolic execution took {:?}", overall_sym_exec_time.elapsed());
     info!("symbolically executed {} selectors", symbolic_execution_maps.len());
@@ -401,5 +413,10 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
 
     debug!("decompilation took {:?}", start_time.elapsed());
 
-    Ok(DecompileResult { source, abi, abi_with_details })
+    let mut functions = reports.into_values().collect::<Vec<_>>();
+    functions.sort_by(|a, b| {
+        (a.selector == "fallback", &a.selector).cmp(&(b.selector == "fallback", &b.selector))
+    });
+
+    Ok(DecompileResult { source, abi, abi_with_details, functions })
 }

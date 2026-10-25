@@ -724,6 +724,8 @@ pub(crate) enum Statement {
     },
     Noop,
     CloseBlock,
+    /// A note for the reader, rendered as a block comment (e.g. a path that was not explored).
+    Comment(String),
 }
 
 impl Statement {
@@ -776,7 +778,7 @@ impl Statement {
                     value.visit_mut(visitor);
                 }
             }
-            Self::Else | Self::Noop | Self::CloseBlock => {}
+            Self::Else | Self::Noop | Self::CloseBlock | Self::Comment(_) => {}
         }
     }
 
@@ -952,6 +954,7 @@ impl Statement {
                 args.iter().map(Expr::render).collect::<Vec<_>>().join(", ")
             ),
             Self::KeccakSnapshot(_) | Self::Noop => String::new(),
+            Self::Comment(text) => format!("/* {} */", text.replace("*/", "* /")),
             Self::CloseBlock => "}".to_string(),
         }
     }

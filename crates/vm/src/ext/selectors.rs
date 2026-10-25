@@ -107,6 +107,11 @@ pub fn find_function_selectors(evm: &VM, assembly: &str) -> HashMap<String, u128
     function_selectors
 }
 
+/// Upper bound on VM steps spent walking the dispatcher for one selector. A dispatcher has no
+/// loops, so a walk that needs more steps is stuck in a loop of the code itself (a backward JUMP
+/// never trips the JUMPI check below), and would otherwise never return.
+pub const MAX_DISPATCH_STEPS: usize = 100_000;
+
 /// resolve a selector's function entry point from the EVM bytecode
 // TODO: update resolve_entry_point logic to support vyper
 pub fn resolve_entry_point(vm: &mut VM, selector: &str) -> u128 {
@@ -114,7 +119,16 @@ pub fn resolve_entry_point(vm: &mut VM, selector: &str) -> u128 {
 
     // execute the EVM call to find the entry point for the given selector
     vm.calldata = decode_hex(selector).expect("Failed to decode selector.");
+    let mut steps = 0;
     while vm.bytecode.len() >= vm.instruction as usize {
+        steps += 1;
+        if steps > MAX_DISPATCH_STEPS {
+            warn!(
+                "dispatcher walk for selector {} exceeded {} steps",
+                selector, MAX_DISPATCH_STEPS
+            );
+            break;
+        }
         let call = match vm.step() {
             Ok(call) => call,
             Err(_) => break, // the call failed, so we can't resolve the selector
@@ -195,4 +209,27 @@ where
     info!("resolved {} signatures from {} selectors", signatures.len(), selector_count);
     debug!("signature resolution took {:?}", start_time.elapsed());
     signatures
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::Address;
+
+    use super::*;
+
+    #[test]
+    fn dispatcher_walk_stops_on_an_endless_jump_loop() {
+        // 0: PUSH4 aabbccdd  5: POP  6: JUMPDEST  7: PUSH1 6  9: JUMP -- loops forever, no JUMPI
+        let code = decode_hex("63aabbccdd505b600656").unwrap();
+        let mut vm = VM::new(
+            &code,
+            &[],
+            Address::default(),
+            Address::default(),
+            Address::default(),
+            0,
+            u128::MAX,
+        );
+        assert_eq!(resolve_entry_point(&mut vm, "aabbccdd"), 0);
+    }
 }

@@ -16,4 +16,5 @@ mod utils;
 pub use core::{decompile, DecompileResult};
 pub use error::Error;
 pub use heimdall_vm::core::hardfork::HardFork;
-pub use interfaces::{DecompilerArgs, DecompilerArgsBuilder};
+pub use heimdall_vm::ext::exec::{ExecStats, Truncation, TruncationReason};
+pub use interfaces::{BodyStatus, DecompilerArgs, DecompilerArgsBuilder, FunctionReport};

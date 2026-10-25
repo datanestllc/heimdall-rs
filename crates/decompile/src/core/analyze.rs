@@ -174,6 +174,14 @@ impl Analyzer {
                 }
             }
 
+            // a path cut short during symbolic execution ends with a marker, not in silence
+            if let Some(truncation) = branch.truncated {
+                self.function.push_statement(Statement::Comment(format!(
+                    "path not explored: {} at pc {:#x}",
+                    truncation.reason, truncation.pc
+                )));
+            }
+
             // Preserve the taken and fallthrough children as explicit alternatives for Solidity.
             if self.typ == AnalyzerType::Solidity {
                 if let Some(state) = branch.operations.last() {
@@ -283,5 +291,92 @@ impl Analyzer {
 
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use alloy::primitives::U256;
+    use heimdall_vm::{
+        core::{
+            memory::Memory,
+            opcodes::{self, WrappedInput, WrappedOpcode},
+            stack::Stack,
+            storage::Storage,
+            vm::{Instruction, State},
+        },
+        ext::exec::{Truncation, TruncationReason, VMTrace},
+    };
+
+    use super::*;
+
+    fn state(instruction: u128, opcode: u8, inputs: Vec<U256>, ops: Vec<WrappedOpcode>) -> State {
+        State {
+            last_instruction: Instruction {
+                instruction,
+                opcode,
+                inputs,
+                outputs: vec![],
+                input_operations: ops,
+                output_operations: vec![],
+            },
+            gas_used: 0,
+            gas_remaining: 0,
+            stack: Stack::new(),
+            memory: Memory::new(),
+            storage: Storage::new(),
+            events: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn truncated_child_keeps_the_jumpi_condition_and_a_marker() {
+        // JUMPI at pc 9 (instruction 10) to pc 20 on calldataload(4)
+        let condition = WrappedOpcode::new(
+            opcodes::CALLDATALOAD,
+            vec![WrappedInput::Opcode(Arc::new(WrappedOpcode::new(
+                opcodes::PUSH1,
+                vec![U256::from(4).into()],
+            )))],
+        );
+        let jumpi = state(
+            10,
+            opcodes::JUMPI,
+            vec![U256::from(20), U256::ZERO],
+            vec![WrappedOpcode::new(opcodes::PUSH1, vec![U256::from(20).into()]), condition],
+        );
+        let taken = VMTrace {
+            instruction: 21,
+            operations: vec![state(21, opcodes::JUMPDEST, vec![], vec![])],
+            truncated: Some(Truncation { reason: TruncationReason::StepBudget, pc: 21 }),
+            ..Default::default()
+        };
+        let fallthrough = VMTrace {
+            instruction: 11,
+            operations: vec![state(11, opcodes::STOP, vec![], vec![])],
+            ..Default::default()
+        };
+        let root = VMTrace {
+            instruction: 1,
+            operations: vec![jumpi],
+            children: vec![taken, fallthrough],
+            ..Default::default()
+        };
+
+        let mut analyzer =
+            Analyzer::new(AnalyzerType::Solidity, true, AnalyzedFunction::new("deadbeef", false));
+        let function = analyzer.analyze(root).await.unwrap();
+        let rendered = function
+            .statements
+            .iter()
+            .map(|s| s.render(crate::core::ir::RenderTarget::Solidity))
+            .collect::<Vec<_>>();
+        // the condition of the JUMPI survives although one child was cut short
+        assert_eq!(
+            rendered,
+            vec!["if (arg0) {", "/* path not explored: step_budget at pc 0x15 */", "} else {", "}"]
+        );
     }
 }

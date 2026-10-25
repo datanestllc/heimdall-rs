@@ -81,7 +81,7 @@ fn statement_usages(statement: &Statement) -> HashSet<String> {
                 collect(value);
             }
         }
-        Statement::Else | Statement::Noop | Statement::CloseBlock => {}
+        Statement::Else | Statement::Noop | Statement::CloseBlock | Statement::Comment(_) => {}
     }
 
     usages
